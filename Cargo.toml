@@ -1,18 +1,18 @@
 [package]
 name = "embedded-debugger-mcp"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-authors = ["adancurusul <adancurusul@gmail.com>"]
+authors = ["adancurusul <adancurusul@gmail.com> azsora <way7539512@gmail.com>"]
 description = "A Model Context Protocol server for embedded debugging with probe-rs - supports ARM Cortex-M, RISC-V debugging via J-Link, ST-Link, and more"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/adancurusul/embedded-debugger-mcp"
+repository = "https://github.com/azsora/embedded-debugger-mcp"
 keywords = ["mcp", "debugging", "embedded", "probe-rs", "rtt"]
 categories = ["development-tools", "embedded"]
 
 [dependencies]
 # MCP SDK
-rmcp = { version = "0.3.2", features = ["server", "macros", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
 
 # Core debugging library
 probe-rs = "0.31"

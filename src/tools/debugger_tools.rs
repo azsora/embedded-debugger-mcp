@@ -1,17 +1,16 @@
-//! Complete RMCP 0.3.2 implementation for embedded debugger MCP tools
+//! Complete RMCP 1.7 implementation for embedded debugger MCP tools
 //! 
 //! This implementation provides all 18 debugging tools (13 base + 5 RTT) using real probe-rs integration
 
 use rmcp::{
     tool, tool_handler, tool_router, ServerHandler,
-    handler::server::{router::tool::ToolRouter, tool::Parameters},
+    handler::server::{tool::ToolRouter, wrapper::Parameters},
     model::*,
     ErrorData as McpError,
     service::RequestContext,
     RoleServer,
 };
 use tracing::{debug, error, info, warn};
-use std::future::Future;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -131,7 +130,19 @@ impl EmbeddedDebuggerToolHandler {
                 match probe_info.open() {
                     Ok(probe) => {
                         info!("Attaching to target: {}", args.target_chip);
-                        match probe.attach(&args.target_chip, Permissions::default()) {
+
+                        // Get reference to the custom registry loaded at startup
+                        // Use block_on to get the lock in async context, then drop it before any await
+                        let registry = crate::debugger::registry::CUSTOM_REGISTRY.clone();
+                        let reg = futures::executor::block_on(registry.read());
+
+                        // Use attach_with_registry (takes reference to Registry)
+                        let session_result = probe.attach_with_registry(&args.target_chip, Permissions::default(), &reg);
+
+                        // Drop reg before await to make future Send-safe
+                        drop(reg);
+
+                        match session_result {
                             Ok(session) => {
                                 let session_id = format!("session_{}", chrono::Utc::now().timestamp_millis());
                                 
@@ -1817,17 +1828,14 @@ fn format_memory_data(data: &[u8], format: &str, base_address: u64) -> String {
 #[tool_handler]
 impl ServerHandler for EmbeddedDebuggerToolHandler {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            server_info: Implementation::from_build_env(),
-            instructions: Some("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 22 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.".to_string()),
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_instructions("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 22 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.")
     }
 
     async fn initialize(
         &self,
-        _request: InitializeRequestParam,
+        _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         info!("Complete Embedded Debugger MCP server initialized with all 22 tools (18 debug + 4 flash)");

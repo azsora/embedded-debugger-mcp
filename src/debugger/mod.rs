@@ -1,6 +1,7 @@
 //! Debugger session management
 
 pub mod discovery;
+pub mod registry;
 
 /// Configuration for a debug session
 #[derive(Debug, Clone)]

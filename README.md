@@ -1,7 +1,7 @@
 # Embedded Debugger MCP Server
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://rust-lang.org)
-[![RMCP](https://img.shields.io/badge/RMCP-0.3.2-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
+[![RMCP](https://img.shields.io/badge/RMCP-1.7-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 A professional Model Context Protocol (MCP) server for embedded debugging with probe-rs. Provides AI assistants with comprehensive debugging capabilities for embedded systems including ARM Cortex-M, RISC-V microcontrollers with real hardware integration.

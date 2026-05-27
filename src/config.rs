@@ -71,6 +71,10 @@ pub struct Args {
     /// Show current configuration and exit
     #[arg(long)]
     pub show_config: bool,
+
+    /// Path to directory containing custom chip YAML files
+    #[arg(long, default_value = "3rd-chip")]
+    pub chip_dir: PathBuf,
 }
 
 /// Main configuration structure
@@ -129,6 +133,7 @@ impl Config {
         self.security.restrict_memory_access = args.restrict_memory_access;
         self.logging.level = args.log_level.clone();
         self.logging.file = args.log_file.clone();
+        self.debugger.chip_dir = args.chip_dir.clone();
     }
 
     /// Validate configuration
@@ -232,6 +237,7 @@ pub struct DebuggerConfig {
     pub reset_on_connect: bool,
     pub connect_under_reset: bool,
     pub default_reset_type: String,
+    pub chip_dir: PathBuf,
 }
 
 impl Default for DebuggerConfig {
@@ -245,6 +251,7 @@ impl Default for DebuggerConfig {
             reset_on_connect: false,
             connect_under_reset: false,
             default_reset_type: "hardware".to_string(),
+            chip_dir: PathBuf::from("3rd-chip"),
         }
     }
 }

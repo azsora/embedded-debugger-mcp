@@ -9,6 +9,7 @@ use embedded_debugger_mcp::{
     Config,
     config::Args,
     tools::EmbeddedDebuggerToolHandler,
+    debugger::registry::init_custom_registry,
 };
 
 #[tokio::main]
@@ -58,6 +59,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
     info!("Configuration loaded and validated successfully");
+
+    // Initialize custom chip registry from 3rd-chip/*.yaml files
+    if let Err(e) = init_custom_registry(&config.debugger.chip_dir) {
+        error!("Failed to initialize custom chip registry: {}", e);
+    }
 
     // Create and serve the handler using rust-sdk standard pattern
     let service = EmbeddedDebuggerToolHandler::new(config.server.max_sessions)

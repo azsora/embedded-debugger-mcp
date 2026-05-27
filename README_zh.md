@@ -1,7 +1,7 @@
 # 嵌入式调试器 MCP 服务器
 
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://rust-lang.org)
-[![RMCP](https://img.shields.io/badge/RMCP-0.3.2-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
+[![RMCP](https://img.shields.io/badge/RMCP-1.7-blue.svg)](https://github.com/modelcontextprotocol/rust-sdk)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 专业的模型上下文协议 (MCP) 嵌入式调试服务器，基于 probe-rs 构建。为 AI 助手提供包括 ARM Cortex-M、RISC-V 微控制器在内的全面嵌入式系统调试功能，支持真实硬件集成。
