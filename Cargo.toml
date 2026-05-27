@@ -15,7 +15,7 @@ categories = ["development-tools", "embedded"]
 rmcp = { version = "0.3.2", features = ["server", "macros", "transport-io"] }
 
 # Core debugging library
-probe-rs = "0.25"
+probe-rs = "0.31"
 
 # Async runtime
 tokio = { version = "1.41", features = ["full"] }
@@ -44,7 +44,7 @@ hex = "0.4"
 base64 = "0.22"
 
 # ELF parsing for RTT symbol detection
-goblin = "0.8"
+goblin = "0.10"
 
 # Async utilities
 futures = "0.3"

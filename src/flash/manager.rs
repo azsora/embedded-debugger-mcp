@@ -76,7 +76,7 @@ impl FlashManager {
         match erase_type {
             EraseType::All => {
                 debug!("Starting full flash erase");
-                flashing::erase_all(session, FlashProgress::empty())
+                flashing::erase_all(session, &mut FlashProgress::empty(), false)
                     .map_err(|e| DebugError::FlashOperationFailed(format!("Full erase failed: {}", e)))?;
                 
                 info!("Full flash erase completed");
@@ -132,21 +132,21 @@ impl FlashManager {
             FileFormat::Auto => {
                 // Auto-detect based on extension
                 match file_path.extension().and_then(|s| s.to_str()) {
-                    Some("elf") => flashing::Format::Elf,
-                    Some("hex") => flashing::Format::Hex, 
-                    Some("bin") => flashing::Format::Bin(probe_rs::flashing::BinOptions { base_address: None, skip: 0 }),
+                    Some("elf") => flashing::Format::Elf(flashing::ElfOptions::default()),
+                    Some("hex") => flashing::Format::Hex,
+                    Some("bin") => flashing::Format::Bin(flashing::BinOptions { base_address: None, skip: 0 }),
                     _ => return Err(DebugError::FlashOperationFailed("Cannot auto-detect file format".to_string())),
                 }
             }
-            FileFormat::Elf => flashing::Format::Elf,
+            FileFormat::Elf => flashing::Format::Elf(flashing::ElfOptions::default()),
             FileFormat::Hex => flashing::Format::Hex,
-            FileFormat::Bin => flashing::Format::Bin(probe_rs::flashing::BinOptions { base_address, skip: 0 }),
+            FileFormat::Bin => flashing::Format::Bin(flashing::BinOptions { base_address, skip: 0 }),
         };
 
         // Setup download options - use default and override what we need
         let mut options = flashing::DownloadOptions::default();
         options.verify = true;
-        options.progress = None;
+        options.progress = FlashProgress::empty();
 
         // Set base address for BIN files - this might need to be handled differently
         if matches!(probe_format, flashing::Format::Bin(_)) {
