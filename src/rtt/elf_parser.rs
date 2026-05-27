@@ -66,8 +66,87 @@ fn is_valid_rtt_address(address: u64) -> bool {
     // But allow broader range for different MCUs
     const RAM_START: u64 = 0x20000000;
     const RAM_END: u64 = 0x2FFFFFFF;
-    
+
     address >= RAM_START && address <= RAM_END
+}
+
+/// Get section name for a symbol
+fn get_symbol_section_name(elf: &goblin::elf::Elf, sym: &goblin::elf::Sym) -> String {
+    if let Some(section) = elf.section_headers.get(sym.st_shndx as usize) {
+        if let Some(name) = elf.shdr_strtab.get_at(section.sh_name) {
+            return name.to_string();
+        }
+    }
+    "unknown".to_string()
+}
+
+/// Find a symbol in ELF by exact name match
+/// Returns SymbolInfo with address, size, and section name
+pub fn get_symbol_from_elf(elf_path: &Path, symbol_name: &str) -> Result<SymbolInfo> {
+    let elf_data = std::fs::read(elf_path).map_err(|e| {
+        DebugError::RttError(format!("Failed to read ELF file {}: {}", elf_path.display(), e))
+    })?;
+
+    let elf = goblin::elf::Elf::parse(&elf_data).map_err(|e| {
+        DebugError::RttError(format!("Failed to parse ELF file {}: {}", elf_path.display(), e))
+    })?;
+
+    for sym in elf.syms.iter() {
+        if let Some(name) = elf.strtab.get_at(sym.st_name) {
+            if name == symbol_name {
+                return Ok(SymbolInfo {
+                    name: name.to_string(),
+                    address: sym.st_value,
+                    size: sym.st_size,
+                    section: get_symbol_section_name(&elf, &sym),
+                });
+            }
+        }
+    }
+
+    Err(DebugError::SymbolNotFound(format!(
+        "Symbol '{}' not found in ELF file {}. Use verbose=true to list all available symbols.",
+        symbol_name,
+        elf_path.display()
+    )))
+}
+
+/// List all symbols in ELF that contain the given substring (case-insensitive)
+/// Useful for finding symbols when exact name is unknown
+pub fn find_symbols_by_pattern(elf_path: &Path, pattern: &str) -> Result<Vec<SymbolInfo>> {
+    let elf_data = std::fs::read(elf_path).map_err(|e| {
+        DebugError::RttError(format!("Failed to read ELF file {}: {}", elf_path.display(), e))
+    })?;
+
+    let elf = goblin::elf::Elf::parse(&elf_data).map_err(|e| {
+        DebugError::RttError(format!("Failed to parse ELF file {}: {}", elf_path.display(), e))
+    })?;
+
+    let pattern_lower = pattern.to_lowercase();
+    let mut results = Vec::new();
+
+    for sym in elf.syms.iter() {
+        if let Some(name) = elf.strtab.get_at(sym.st_name) {
+            if name.to_lowercase().contains(&pattern_lower) {
+                results.push(SymbolInfo {
+                    name: name.to_string(),
+                    address: sym.st_value,
+                    size: sym.st_size,
+                    section: get_symbol_section_name(&elf, &sym),
+                });
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Err(DebugError::SymbolNotFound(format!(
+            "No symbols matching '{}' found in ELF file {}",
+            pattern,
+            elf_path.display()
+        )));
+    }
+
+    Ok(results)
 }
 
 /// Get comprehensive ELF information for debugging
@@ -88,6 +167,7 @@ pub fn get_elf_debug_info(elf_path: &Path) -> Result<ElfDebugInfo> {
                     name: name.to_string(),
                     address: sym.st_value,
                     size: sym.st_size,
+                    section: get_symbol_section_name(&elf, &sym),
                 });
             }
         }
@@ -114,6 +194,7 @@ pub struct SymbolInfo {
     pub name: String,
     pub address: u64,
     pub size: u64,
+    pub section: String,
 }
 
 #[cfg(test)]

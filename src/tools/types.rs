@@ -292,6 +292,21 @@ pub struct RttChannelsArgs {
 }
 
 // =============================================================================
+// ELF Symbol Reading Types
+// =============================================================================
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadSymbolArgs {
+    /// Path to ELF firmware file
+    pub elf_path: String,
+    /// Symbol name to look up (exact match)
+    pub symbol_name: String,
+    /// If true, search for symbols containing symbol_name as substring (case-insensitive)
+    #[serde(default)]
+    pub verbose: bool,
+}
+
+// =============================================================================
 // Response Types (for internal use)
 // =============================================================================
 

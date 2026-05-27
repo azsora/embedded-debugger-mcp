@@ -1221,6 +1221,58 @@ impl EmbeddedDebuggerToolHandler {
         }
     }
 
+    #[tool(description = "Read symbol address and size from ELF file")]
+    async fn read_symbol(&self, Parameters(args): Parameters<ReadSymbolArgs>) -> Result<CallToolResult, McpError> {
+        debug!("Reading symbol '{}' from ELF: {}", args.symbol_name, args.elf_path);
+
+        let elf_path = std::path::Path::new(&args.elf_path);
+        if !elf_path.exists() {
+            let error_msg = format!("❌ ELF file not found: {}\n\nPlease provide a valid path to an ELF firmware file.", args.elf_path);
+            return Err(McpError::internal_error(error_msg, None));
+        }
+
+        let message = if args.verbose {
+            // Search for symbols matching the pattern
+            match crate::rtt::find_symbols_by_pattern(elf_path, &args.symbol_name) {
+                Ok(symbols) => {
+                    if symbols.is_empty() {
+                        format!("🔍 Search Results for '{}':\n\nNo matching symbols found.", args.symbol_name)
+                    } else {
+                        let mut msg = format!("🔍 Search Results for '{}' ({} matches):\n\n", args.symbol_name, symbols.len());
+                        msg.push_str("| Symbol Name | Address | Size | Section |\n");
+                        msg.push_str("|-------------|---------|------|---------|\n");
+                        for sym in symbols {
+                            msg.push_str(&format!(
+                                "| {} | 0x{:08X} | {} bytes | {} |\n",
+                                sym.name, sym.address, sym.size, sym.section
+                            ));
+                        }
+                        msg
+                    }
+                }
+                Err(e) => {
+                    format!("❌ Search failed: {}", e)
+                }
+            }
+        } else {
+            // Exact match search
+            match crate::rtt::get_symbol_from_elf(elf_path, &args.symbol_name) {
+                Ok(sym) => {
+                    format!(
+                        "✅ Symbol '{}' found:\n\n  Address: 0x{:08X}\n  Size: {} bytes\n  Section: {}",
+                        sym.name, sym.address, sym.size, sym.section
+                    )
+                }
+                Err(e) => {
+                    format!("❌ Symbol '{}' not found: {}\n\nHint: Use verbose=true to search for symbols containing '{}' as substring.",
+                        args.symbol_name, e, args.symbol_name)
+                }
+            }
+        };
+
+        Ok(CallToolResult::success(vec![Content::text(message)]))
+    }
+
     // =============================================================================
     // Flash Programming Tools (4 tools)
     // =============================================================================

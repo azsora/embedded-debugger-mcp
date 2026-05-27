@@ -38,6 +38,9 @@ pub enum DebugError {
     #[error("RTT error: {0}")]
     RttError(String),
 
+    #[error("Symbol not found: {0}")]
+    SymbolNotFound(String),
+
     #[error("Flash operation failed: {0}")]
     FlashOperationFailed(String),
 
