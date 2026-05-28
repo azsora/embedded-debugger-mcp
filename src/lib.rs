@@ -8,6 +8,7 @@ pub mod config;
 pub mod error;
 pub mod utils;
 pub mod debugger;
+pub mod parser;
 pub mod rtt;
 pub mod flash;
 pub mod tools;

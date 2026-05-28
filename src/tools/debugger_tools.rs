@@ -18,6 +18,7 @@ use tokio::sync::RwLock;
 use super::types::*;
 // Flash types will be used through crate::flash:: prefix
 use crate::rtt::RttManager;
+use crate::parser::dwarf_parser;
 
 // Probe-rs imports
 use probe_rs::probe::list::Lister;
@@ -1719,6 +1720,61 @@ impl EmbeddedDebuggerToolHandler {
         info!("Firmware deployment completed for session: {} in {:.1}s", args.session_id, elapsed.as_secs_f64());
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
+
+    // =============================================================================
+    // Variable Reading Tool
+    // =============================================================================
+
+    #[tool(description = "Read variable value from target memory using DWARF debug info. Supports global variables, struct members (e.g., 'config.baudrate'), and array elements (e.g., 'buffer[5]').")]
+    async fn read_variable(&self, Parameters(args): Parameters<ReadVariableArgs>) -> Result<CallToolResult, McpError> {
+        debug!("Reading variable '{}' for session: {}", args.expression, args.session_id);
+
+        // 获取会话
+        let sessions = self.sessions.read().await;
+        let session_data = sessions.get(&args.session_id).ok_or_else(|| {
+            McpError::invalid_params(format!("Session not found: {}", args.session_id), None)
+        })?;
+
+        // 解析表达式获取地址和类型
+        let elf_path = std::path::Path::new(&args.elf_path);
+        let resolved = dwarf_parser::resolve_expression(elf_path, &args.expression)
+            .map_err(|e| McpError::invalid_params(format!("Failed to resolve expression '{}': {}", args.expression, e), None))?;
+
+        // 读取内存
+        let size = resolved.type_info.size() as usize;
+        if size == 0 {
+            return Err(McpError::invalid_params("Cannot read variable with size 0", None));
+        }
+
+        let mut data = vec![0u8; size];
+        {
+            let mut session = session_data.session.lock().await;
+            let mut core = session.core(0).map_err(|e| {
+                McpError::internal_error(format!("Failed to access core: {}", e), None)
+            })?;
+
+            core.read(resolved.address, &mut data).map_err(|e| {
+                McpError::internal_error(format!("Failed to read memory at 0x{:08X}: {}", resolved.address, e), None)
+            })?;
+        }
+
+        // 解释值
+        let value = dwarf_parser::interpret_value(&data, &resolved.type_info)
+            .map_err(|e| McpError::internal_error(format!("Failed to interpret value: {}", e), None))?;
+
+        // 构建响应
+        let response = serde_json::json!({
+            "expression": args.expression,
+            "address": format!("0x{:08X}", resolved.address),
+            "type": resolved.type_info.type_name(),
+            "size": size,
+            "value": value
+        });
+
+        let message = serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{:?}", response));
+        info!("Read variable '{}' at 0x{:08X}, size={}", args.expression, resolved.address, size);
+        Ok(CallToolResult::success(vec![Content::text(message)]))
+    }
 }
 
 // =============================================================================
@@ -1882,7 +1938,7 @@ impl ServerHandler for EmbeddedDebuggerToolHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
-            .with_instructions("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 22 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware.")
+            .with_instructions("Complete embedded debugging and flash programming MCP server supporting ARM Cortex-M, RISC-V, and other architectures via probe-rs. Provides comprehensive debugging and flash programming capabilities including probe detection, target connection, memory operations, breakpoints, RTT communication, and flash programming with real hardware integration. All 23 tools available: list_probes, connect, disconnect, probe_info, halt, run, reset, step, get_status, read_memory, write_memory, set_breakpoint, clear_breakpoint, rtt_attach, rtt_detach, rtt_read, rtt_write, rtt_channels, flash_erase, flash_program, flash_verify, run_firmware, read_variable.")
     }
 
     async fn initialize(
@@ -1890,7 +1946,7 @@ impl ServerHandler for EmbeddedDebuggerToolHandler {
         _request: InitializeRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
-        info!("Complete Embedded Debugger MCP server initialized with all 22 tools (18 debug + 4 flash)");
+        info!("Complete Embedded Debugger MCP server initialized with all 23 tools (18 debug + 4 flash + 1 symbol)");
         Ok(self.get_info())
     }
 }

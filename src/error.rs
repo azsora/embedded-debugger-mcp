@@ -41,6 +41,18 @@ pub enum DebugError {
     #[error("Symbol not found: {0}")]
     SymbolNotFound(String),
 
+    #[error("DWARF error: {0}")]
+    DwarfError(String),
+
+    #[error("Struct not found in DWARF: {0}")]
+    StructNotFound(String),
+
+    #[error("Member not found in struct {0}: {1}")]
+    MemberNotFound(String, String),
+
+    #[error("Variable not found: {0}")]
+    VariableNotFound(String),
+
     #[error("Flash operation failed: {0}")]
     FlashOperationFailed(String),
 

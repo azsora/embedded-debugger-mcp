@@ -43,8 +43,9 @@ chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 base64 = "0.22"
 
-# ELF parsing for RTT symbol detection
-goblin = "0.10"
+# ELF/DWARF parser - use 0.39 to match probe-rs
+object = "0.38"
+gimli = "0.29"
 
 # Async utilities
 futures = "0.3"

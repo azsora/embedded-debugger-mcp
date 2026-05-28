@@ -306,6 +306,16 @@ pub struct ReadSymbolArgs {
     pub verbose: bool,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReadVariableArgs {
+    /// Session ID (required for memory access)
+    pub session_id: String,
+    /// Path to ELF firmware file (with DWARF debug info)
+    pub elf_path: String,
+    /// Variable expression: variable name, struct member (e.g., "config.baudrate"), or array element (e.g., "buffer[5]")
+    pub expression: String,
+}
+
 // =============================================================================
 // Response Types (for internal use)
 // =============================================================================
