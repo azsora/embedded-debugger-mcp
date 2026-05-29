@@ -10,7 +10,7 @@ A professional Model Context Protocol (MCP) server for embedded debugging with p
 
 ## ✨ Features
 
-- 🚀 **Production Ready**: Real hardware integration with 22 comprehensive debugging tools
+- 🚀 **Production Ready**: Real hardware integration with 24 comprehensive debugging tools
 - 🔌 **Multi-Probe Support**: J-Link, ST-Link V2/V3, DAPLink, Black Magic Probe
 - 🎯 **Complete Debug Control**: Connect, halt, run, reset, single-step execution  
 - 💾 **Memory Operations**: Read/write flash and RAM with multiple data formats
@@ -19,7 +19,7 @@ A professional Model Context Protocol (MCP) server for embedded debugging with p
 - 📡 **RTT Bidirectional**: Real-Time Transfer with interactive command/response system
 - 🏗️ **Multi-Architecture**: ARM Cortex-M, RISC-V with tested STM32 integration
 - 🤖 **AI Integration**: Perfect compatibility with Claude and other AI assistants
-- 🧪 **Comprehensive Testing**: All 22 tools validated with real STM32G431CBTx hardware
+- 🧪 **Comprehensive Testing**: All 24 tools validated with real STM32G431CBTx hardware
 
 ## 🏗️ Architecture
 
@@ -114,7 +114,7 @@ cargo build --release
 
 **What the demo shows:**
 - ✅ **Interactive RTT Communication**: Send commands and get real-time responses
-- ✅ **All 22 MCP Tools**: Complete validation with real STM32 hardware
+- ✅ **All 24 MCP Tools**: Complete validation with real STM32 hardware
 - ✅ **Fibonacci Calculator**: Live data streaming with control commands
 - ✅ **Hardware Integration**: Tested with STM32G431CBTx + ST-Link V2
 
@@ -142,12 +142,12 @@ Please attach RTT and show me the data from the terminal channel. Then send a co
 Read 64 bytes of memory from address 0x08000000 and analyze the data format
 ```
 
-#### Test All 22 MCP Tools
+#### Test All 24 MCP Tools
 ```
-Please help me test all 22 MCP embedded debugger tools with my STM32 board. Start by connecting to the probe, then systematically test each tool category: probe management, memory operations, debug control, breakpoints, flash operations, RTT communication, and session management.
+Please help me test all 24 MCP embedded debugger tools with my STM32 board. Start by connecting to the probe, then systematically test each tool category: probe management, memory operations, debug control, breakpoints, flash operations, RTT communication, and session management.
 ```
 
-## 🛠️ Complete Tool Set (22 Tools)
+## 🛠️ Complete Tool Set (24 Tools)
 
 All tools tested and validated with real STM32 hardware:
 
@@ -185,6 +185,12 @@ All tools tested and validated with real STM32 hardware:
 | `flash_program` | Program ELF/HEX/BIN files | ✅ Production Ready |
 | `flash_verify` | Verify flash contents | ✅ Production Ready |
 
+### 🔍 Symbol/Variable Access (2 tools)
+| Tool | Description | Status |
+|------|-------------|---------|
+| `read_symbol` | Read symbol address from ELF file | ✅ Production Ready |
+| `read_variable` | Read variable value via DWARF debug info | ✅ Production Ready |
+
 ### 📡 RTT Communication (6 tools)
 | Tool | Description | Status |
 |------|-------------|---------|
@@ -201,7 +207,7 @@ All tools tested and validated with real STM32 hardware:
 | `get_status` | Get current debug status | ✅ Production Ready |
 | `disconnect` | Clean session termination | ✅ Production Ready |
 
-**✅ 22/22 Tools - 100% Success Rate with Real Hardware**
+**✅ 24/24 Tools - 100% Success Rate with Real Hardware**
 
 ## 🌍 Supported Hardware
 
@@ -223,7 +229,7 @@ All tools tested and validated with real STM32 hardware:
 
 **Current Status: PRODUCTION READY**
 
-- ✅ **Complete probe-rs Integration**: Real hardware debugging with all 22 tools
+- ✅ **Complete probe-rs Integration**: Real hardware debugging with all 24 tools
 - ✅ **Hardware Validation**: Tested with STM32G431CBTx + ST-Link V2
 - ✅ **RTT Bidirectional**: Full interactive communication with real-time commands
 - ✅ **Flash Operations**: Complete erase, program, verify workflow

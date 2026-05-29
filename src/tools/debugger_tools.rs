@@ -67,38 +67,38 @@ impl EmbeddedDebuggerToolHandler {
     // =============================================================================
 
     #[tool(description = "List all available debug probes (J-Link, ST-Link, DAPLink, etc.)")]
-    async fn list_probes(&self, Parameters(_args): Parameters<ListProbesArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Listing available debug probes");
-        
+    async fn list_probes(&self, Parameters(args): Parameters<ListProbesArgs>) -> Result<CallToolResult, McpError> {
+        info!(input = ?args, "工具调用: list_probes");
+
         // Real probe-rs integration
         let probes = Lister::new().list_all();
         let message = if probes.is_empty() {
             "No debug probes found.\n\nPlease ensure your probe is connected and drivers are installed.\nSupported probes: J-Link, ST-Link, DAPLink, Black Magic Probe".to_string()
         } else {
             let mut result = format!("Found {} debug probe(s):\n\n", probes.len());
-            
+
             for (i, probe) in probes.iter().enumerate() {
                 result.push_str(&format!("{}. {}\n", i + 1, probe.identifier));
                 result.push_str(&format!("   VID:PID = {:04X}:{:04X}\n", probe.vendor_id, probe.product_id));
-                
+
                 if let Some(serial) = &probe.serial_number {
                     result.push_str(&format!("   Serial: {}\n", serial));
                 }
-                
+
                 result.push_str(&format!("   Probe Type: {:?}\n", probe.probe_type()));
                 result.push('\n');
             }
-            
+
             result
         };
-        
-        info!("Listed {} debug probes", probes.len());
+
+        info!(probe_count = probes.len(), "工具完成: list_probes");
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
     #[tool(description = "Connect to a debug probe and target chip")]
     async fn connect(&self, Parameters(args): Parameters<ConnectArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Connecting to probe '{}' and target '{}'", args.probe_selector, args.target_chip);
+        info!(input = ?args, "工具调用: connect");
         
         // Check session limit
         {
@@ -177,11 +177,11 @@ impl EmbeddedDebuggerToolHandler {
                                     chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
                                 );
                                 
-                                info!("Created debug session: {}", session_id);
+                                info!(session_id = %session_id, probe = %probe_info.identifier, target = %args.target_chip, "工具完成: connect");
                                 Ok(CallToolResult::success(vec![Content::text(message)]))
                             }
                             Err(e) => {
-                                error!("Failed to attach to target '{}': {}", args.target_chip, e);
+                                error!(target = %args.target_chip, error = %e, "工具失败: connect - 无法连接目标");
                                 let error_msg = format!(
                                     "❌ Failed to attach to target '{}'\n\n\
                                     Error: {}\n\n\
@@ -196,7 +196,7 @@ impl EmbeddedDebuggerToolHandler {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to open probe '{}': {}", probe_info.identifier, e);
+                        error!(probe = %probe_info.identifier, error = %e, "工具失败: connect - 无法打开探针");
                         let error_msg = format!(
                             "❌ Failed to open probe '{}'\n\nError: {}\n\n\
                             Suggestions:\n\
@@ -229,14 +229,14 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Disconnect from a debug session")]
     async fn disconnect(&self, Parameters(args): Parameters<DisconnectArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Disconnecting session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: disconnect");
+
         // Remove session from storage
         let removed_session = {
             let mut sessions = self.sessions.write().await;
             sessions.remove(&args.session_id)
         };
-        
+
         match removed_session {
             Some(session) => {
                 let message = format!(
@@ -251,11 +251,12 @@ impl EmbeddedDebuggerToolHandler {
                     session.target_chip,
                     (chrono::Utc::now() - session.created_at).num_seconds() as f64 / 60.0
                 );
-                
-                info!("Disconnected debug session: {}", args.session_id);
+
+                info!(session_id = %args.session_id, "工具完成: disconnect");
                 Ok(CallToolResult::success(vec![Content::text(message)]))
             }
             None => {
+                error!(session_id = %args.session_id, "工具失败: disconnect - 会话不存在");
                 let error_msg = format!("❌ Session '{}' not found\n\nUse 'list_sessions' to see active sessions", args.session_id);
                 Err(McpError::internal_error(error_msg, None))
             }
@@ -264,23 +265,24 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Get basic information about a debug session")]
     async fn probe_info(&self, Parameters(args): Parameters<ProbeInfoArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Getting probe info for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: probe_info");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: probe_info - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Calculate session duration
         let duration_minutes = (chrono::Utc::now() - session_arc.created_at).num_seconds() as f64 / 60.0;
-        
+
         let message = format!(
             "📊 Debug Session Information\n\n\
             Probe Information:\n\
@@ -299,8 +301,8 @@ impl EmbeddedDebuggerToolHandler {
             session_arc.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
             duration_minutes
         );
-        
-        info!("Retrieved probe info for session: {}", args.session_id);
+
+        info!(session_id = %args.session_id, "工具完成: probe_info");
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
@@ -310,30 +312,31 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Halt the target CPU execution")]
     async fn halt(&self, Parameters(args): Parameters<HaltArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Halting target for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: halt");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: halt - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Halt the target
         {
             let mut session = session_arc.session.lock().await;
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: halt - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.halt(std::time::Duration::from_millis(1000)) {
                 Ok(_) => {
                     // Get status after halt
@@ -341,7 +344,7 @@ impl EmbeddedDebuggerToolHandler {
                         Ok(_status) => {
                             let pc = core.read_core_reg(core.program_counter()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
                             let sp = core.read_core_reg(core.stack_pointer()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
-                            
+
                             let message = format!(
                                 "✅ Target halted successfully!\n\n\
                                 Session ID: {}\n\
@@ -350,24 +353,25 @@ impl EmbeddedDebuggerToolHandler {
                                 State: Halted\n",
                                 args.session_id, pc, sp
                             );
-                            
-                            info!("Halt completed for session: {}", args.session_id);
+
+                            info!(session_id = %args.session_id, pc = %format!("0x{:08X}", pc), "工具完成: halt");
                             Ok(CallToolResult::success(vec![Content::text(message)]))
                         }
                         Err(e) => {
-                            warn!("Failed to get status after halt: {}", e);
+                            warn!(error = %e, "halt后获取状态失败");
                             let message = format!(
                                 "✅ Target halted successfully!\n\n\
                                 Session ID: {}\n\
                                 State: Halted\n",
                                 args.session_id
                             );
+                            info!(session_id = %args.session_id, "工具完成: halt");
                             Ok(CallToolResult::success(vec![Content::text(message)]))
                         }
                     }
                 }
                 Err(e) => {
-                    error!("Failed to halt target for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: halt - 无法暂停目标");
                     Err(McpError::internal_error(format!("Failed to halt target: {}", e), None))
                 }
             }
@@ -376,30 +380,31 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Resume target CPU execution")]
     async fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Running target for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: run");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: run - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Resume the target
         {
             let mut session = session_arc.session.lock().await;
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: run - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.run() {
                 Ok(_) => {
                     let message = format!(
@@ -409,12 +414,12 @@ impl EmbeddedDebuggerToolHandler {
                         The target is now executing code. Use 'halt' to stop execution.",
                         args.session_id
                     );
-                    
-                    info!("Run completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, "工具完成: run");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to run target for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: run - 无法恢复执行");
                     Err(McpError::internal_error(format!("Failed to run target: {}", e), None))
                 }
             }
@@ -423,42 +428,43 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Reset the target CPU")]
     async fn reset(&self, Parameters(args): Parameters<ResetArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Resetting target for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: reset");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: reset - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Reset the target
         {
             let mut session = session_arc.session.lock().await;
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: reset - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.reset() {
                 Ok(_) => {
                     if args.halt_after_reset {
                         match core.halt(std::time::Duration::from_millis(1000)) {
                             Ok(_) => {},
-                            Err(e) => warn!("Failed to halt after reset: {}", e),
+                            Err(e) => warn!(error = %e, "reset后halt失败"),
                         }
                     }
-                    
+
                     let pc = core.read_core_reg(core.program_counter()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
                     let sp = core.read_core_reg(core.stack_pointer()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
-                    
+
                     let message = format!(
                         "✅ Target reset completed successfully!\n\n\
                         Session ID: {}\n\
@@ -473,12 +479,12 @@ impl EmbeddedDebuggerToolHandler {
                         pc, sp,
                         if args.halt_after_reset { "Halted" } else { "Running" }
                     );
-                    
-                    info!("Reset completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, reset_type = %args.reset_type, "工具完成: reset");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to reset target for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: reset - 无法重置目标");
                     Err(McpError::internal_error(format!("Failed to reset target: {}", e), None))
                 }
             }
@@ -487,35 +493,36 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Execute a single instruction step")]
     async fn step(&self, Parameters(args): Parameters<StepArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Single stepping target for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: step");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: step - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Single step the target
         {
             let mut session = session_arc.session.lock().await;
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: step - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.step() {
                 Ok(_) => {
                     let pc = core.read_core_reg(core.program_counter()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
                     let sp = core.read_core_reg(core.stack_pointer()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
-                    
+
                     let message = format!(
                         "✅ Single step completed successfully!\n\n\
                         Session ID: {}\n\
@@ -524,12 +531,12 @@ impl EmbeddedDebuggerToolHandler {
                         State: Halted\n",
                         args.session_id, pc, sp
                     );
-                    
-                    info!("Step completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, pc = %format!("0x{:08X}", pc), "工具完成: step");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to step target for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: step - 无法单步执行");
                     Err(McpError::internal_error(format!("Failed to step target: {}", e), None))
                 }
             }
@@ -538,42 +545,43 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Get current status of the target CPU and debug session")]
     async fn get_status(&self, Parameters(args): Parameters<GetStatusArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Getting status for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: get_status");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: get_status - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
             }
         };
-        
+
         // Get target status
         {
             let mut session = session_arc.session.lock().await;
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: get_status - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.status() {
                 Ok(status) => {
                     let pc = core.read_core_reg(core.program_counter()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
                     let sp = core.read_core_reg(core.stack_pointer()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
-                    
+
                     let is_halted = matches!(status, CoreStatus::Halted(_));
                     let halt_reason = match status {
                         CoreStatus::Halted(reason) => format!("{:?}", reason),
                         CoreStatus::Running => "N/A".to_string(),
                         _ => "Unknown".to_string(),
                     };
-                    
+
                     let message = format!(
                         "📊 Debug Session Status\n\n\
                         Core Information:\n\
@@ -595,11 +603,12 @@ impl EmbeddedDebuggerToolHandler {
                         session_arc.probe_identifier,
                         (chrono::Utc::now() - session_arc.created_at).num_seconds() as f64 / 60.0
                     );
-                    
+
+                    info!(session_id = %args.session_id, state = %if is_halted { "Halted" } else { "Running" }, "工具完成: get_status");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to get core status for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: get_status - 无法获取状态");
                     Err(McpError::internal_error(format!("Failed to get core status: {}", e), None))
                 }
             }
@@ -612,13 +621,13 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Read memory from the target")]
     async fn read_memory(&self, Parameters(args): Parameters<ReadMemoryArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Reading memory for session: {} at address {}", args.session_id, args.address);
-        
+        info!(input = ?args, "工具调用: read_memory");
+
         // Parse address
         let address = match parse_address(&args.address) {
             Ok(addr) => addr,
             Err(e) => {
-                error!("Invalid address '{}': {}", args.address, e);
+                error!(address = %args.address, error = %e, "工具失败: read_memory - 地址解析失败");
                 return Err(McpError::internal_error(format!("Invalid address '{}': {}", args.address, e), None));
             }
         };
@@ -628,6 +637,7 @@ impl EmbeddedDebuggerToolHandler {
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: read_memory - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -640,16 +650,14 @@ impl EmbeddedDebuggerToolHandler {
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: read_memory - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             let mut data = vec![0u8; args.size as usize];
             match core.read(address, &mut data) {
                 Ok(_) => {
-                    debug!("Read {} bytes from address 0x{:08X}", data.len(), address);
-                    
                     let formatted_data = format_memory_data(&data, &args.format, address);
                     let message = format!(
                         "📖 Memory read completed successfully!\n\n\
@@ -660,12 +668,12 @@ impl EmbeddedDebuggerToolHandler {
                         Data:\n{}",
                         args.session_id, address, args.size, args.format, formatted_data
                     );
-                    
-                    info!("Memory read completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, address = %format!("0x{:08X}", address), size = args.size, "工具完成: read_memory");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to read memory for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, address = %format!("0x{:08X}", address), error = %e, "工具失败: read_memory - 读取失败");
                     Err(McpError::internal_error(format!("Failed to read memory: {}", e), None))
                 }
             }
@@ -674,13 +682,13 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Write memory to the target")]
     async fn write_memory(&self, Parameters(args): Parameters<WriteMemoryArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Writing memory for session: {} at address {}", args.session_id, args.address);
-        
+        info!(input = ?args, "工具调用: write_memory");
+
         // Parse address
         let address = match parse_address(&args.address) {
             Ok(addr) => addr,
             Err(e) => {
-                error!("Invalid address '{}': {}", args.address, e);
+                error!(address = %args.address, error = %e, "工具失败: write_memory - 地址解析失败");
                 return Err(McpError::internal_error(format!("Invalid address '{}': {}", args.address, e), None));
             }
         };
@@ -689,7 +697,7 @@ impl EmbeddedDebuggerToolHandler {
         let data = match parse_data(&args.data, &args.format) {
             Ok(data) => data,
             Err(e) => {
-                error!("Invalid data '{}': {}", args.data, e);
+                error!(data = %args.data, error = %e, "工具失败: write_memory - 数据解析失败");
                 return Err(McpError::internal_error(format!("Invalid data '{}': {}", args.data, e), None));
             }
         };
@@ -699,6 +707,7 @@ impl EmbeddedDebuggerToolHandler {
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: write_memory - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -711,11 +720,11 @@ impl EmbeddedDebuggerToolHandler {
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: write_memory - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.write(address, &data) {
                 Ok(_) => {
                     let message = format!(
@@ -727,12 +736,12 @@ impl EmbeddedDebuggerToolHandler {
                         Bytes written: {}",
                         args.session_id, address, args.data, args.format, data.len()
                     );
-                    
-                    info!("Memory write completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, address = %format!("0x{:08X}", address), bytes = data.len(), "工具完成: write_memory");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to write memory for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: write_memory - 写入失败");
                     Err(McpError::internal_error(format!("Failed to write memory: {}", e), None))
                 }
             }
@@ -745,13 +754,13 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Set a breakpoint at the specified address")]
     async fn set_breakpoint(&self, Parameters(args): Parameters<SetBreakpointArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Setting breakpoint for session: {} at address {}", args.session_id, args.address);
-        
+        info!(input = ?args, "工具调用: set_breakpoint");
+
         // Parse address
         let address = match parse_address(&args.address) {
             Ok(addr) => addr,
             Err(e) => {
-                error!("Invalid address '{}': {}", args.address, e);
+                error!(address = %args.address, error = %e, "工具失败: set_breakpoint - 地址解析失败");
                 return Err(McpError::internal_error(format!("Invalid address '{}': {}", args.address, e), None));
             }
         };
@@ -761,6 +770,7 @@ impl EmbeddedDebuggerToolHandler {
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: set_breakpoint - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -773,11 +783,11 @@ impl EmbeddedDebuggerToolHandler {
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: set_breakpoint - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.set_hw_breakpoint(address) {
                 Ok(_) => {
                     let message = format!(
@@ -789,11 +799,11 @@ impl EmbeddedDebuggerToolHandler {
                         args.session_id, address
                     );
                     
-                    info!("Breakpoint set for session: {} at 0x{:08X}", args.session_id, address);
+                    info!(session_id = %args.session_id, address = %format!("0x{:08X}", address), "工具完成: set_breakpoint");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to set breakpoint for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: set_breakpoint - 设置断点失败");
                     Err(McpError::internal_error(format!("Failed to set breakpoint: {}", e), None))
                 }
             }
@@ -802,13 +812,13 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Clear a breakpoint at the specified address")]
     async fn clear_breakpoint(&self, Parameters(args): Parameters<ClearBreakpointArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Clearing breakpoint for session: {} at address {}", args.session_id, args.address);
-        
+        info!(input = ?args, "工具调用: clear_breakpoint");
+
         // Parse address
         let address = match parse_address(&args.address) {
             Ok(addr) => addr,
             Err(e) => {
-                error!("Invalid address '{}': {}", args.address, e);
+                error!(address = %args.address, error = %e, "工具失败: clear_breakpoint - 地址解析失败");
                 return Err(McpError::internal_error(format!("Invalid address '{}': {}", args.address, e), None));
             }
         };
@@ -818,6 +828,7 @@ impl EmbeddedDebuggerToolHandler {
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: clear_breakpoint - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -830,11 +841,11 @@ impl EmbeddedDebuggerToolHandler {
             let mut core = match session.core(0) {
                 Ok(core) => core,
                 Err(e) => {
-                    error!("Failed to get core for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: clear_breakpoint - 无法获取核心");
                     return Err(McpError::internal_error(format!("Failed to get core: {}", e), None));
                 }
             };
-            
+
             match core.clear_hw_breakpoint(address) {
                 Ok(_) => {
                     let message = format!(
@@ -844,12 +855,12 @@ impl EmbeddedDebuggerToolHandler {
                         The breakpoint has been removed.",
                         args.session_id, address
                     );
-                    
-                    info!("Breakpoint cleared for session: {} at 0x{:08X}", args.session_id, address);
+
+                    info!(session_id = %args.session_id, address = %format!("0x{:08X}", address), "工具完成: clear_breakpoint");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to clear breakpoint for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: clear_breakpoint - 清除断点失败");
                     Err(McpError::internal_error(format!("Failed to clear breakpoint: {}", e), None))
                 }
             }
@@ -862,14 +873,15 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Attach to RTT (Real-Time Transfer) for communication with target")]
     async fn rtt_attach(&self, Parameters(args): Parameters<RttAttachArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Attaching RTT for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: rtt_attach");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: rtt_attach - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -881,6 +893,7 @@ impl EmbeddedDebuggerToolHandler {
             match parse_address(&addr_str) {
                 Ok(addr) => Some(addr),
                 Err(e) => {
+                    error!(address = %addr_str, error = %e, "工具失败: rtt_attach - 控制块地址解析失败");
                     let error_msg = format!("❌ Invalid control block address '{}': {}", addr_str, e);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -913,7 +926,7 @@ impl EmbeddedDebuggerToolHandler {
                 Ok(_) => {
                     let up_channels = rtt_manager.up_channel_count();
                     let down_channels = rtt_manager.down_channel_count();
-                    
+
                     let message = format!(
                         "✅ RTT attached successfully!\n\n\
                         Session ID: {}\n\
@@ -923,12 +936,12 @@ impl EmbeddedDebuggerToolHandler {
                         Use 'rtt_read' to read from target and 'rtt_write' to send data to target.",
                         args.session_id, up_channels, down_channels
                     );
-                    
-                    info!("RTT attached successfully for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, up_channels = up_channels, down_channels = down_channels, "工具完成: rtt_attach");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to attach RTT for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: rtt_attach - RTT附加失败");
                     let error_msg = format!(
                         "❌ Failed to attach RTT\n\n\
                         Session ID: {}\n\
@@ -948,14 +961,15 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Detach from RTT communication")]
     async fn rtt_detach(&self, Parameters(args): Parameters<RttDetachArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Detaching RTT for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: rtt_detach");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: rtt_detach - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -973,12 +987,12 @@ impl EmbeddedDebuggerToolHandler {
                         RTT communication has been closed.",
                         args.session_id
                     );
-                    
-                    info!("RTT detached successfully for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, "工具完成: rtt_detach");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to detach RTT for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: rtt_detach - RTT分离失败");
                     let error_msg = format!("❌ Failed to detach RTT: {}", e);
                     Err(McpError::internal_error(error_msg, None))
                 }
@@ -988,14 +1002,15 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Read data from RTT up channel (target to host)")]
     async fn rtt_read(&self, Parameters(args): Parameters<RttReadArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Reading from RTT channel {} for session: {}", args.channel, args.session_id);
-        
+        info!(input = ?args, "工具调用: rtt_read");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: rtt_read - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1006,6 +1021,7 @@ impl EmbeddedDebuggerToolHandler {
         {
             let mut rtt_manager = session_arc.rtt_manager.lock().await;
             if !rtt_manager.is_attached() {
+                error!(session_id = %args.session_id, "工具失败: rtt_read - RTT未附加");
                 let error_msg = format!("❌ RTT not attached for session '{}'\n\nUse 'rtt_attach' first", args.session_id);
                 return Err(McpError::internal_error(error_msg, None));
             }
@@ -1036,12 +1052,12 @@ impl EmbeddedDebuggerToolHandler {
                         Data:\n{}",
                         args.channel, args.session_id, data_len, data_str
                     );
-                    
-                    debug!("Read {} bytes from RTT channel {} for session: {}", data_len, args.channel, args.session_id);
+
+                    info!(session_id = %args.session_id, channel = args.channel, bytes = data_len, "工具完成: rtt_read");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to read from RTT channel {} for session {}: {}", args.channel, args.session_id, e);
+                    error!(session_id = %args.session_id, channel = args.channel, error = %e, "工具失败: rtt_read - 读取失败");
                     let error_msg = format!(
                         "❌ Failed to read from RTT channel {}\n\n\
                         Session ID: {}\n\
@@ -1056,14 +1072,15 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Write data to RTT down channel (host to target)")]
     async fn rtt_write(&self, Parameters(args): Parameters<RttWriteArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Writing to RTT channel {} for session: {}", args.channel, args.session_id);
-        
+        info!(input = ?args, "工具调用: rtt_write");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: rtt_write - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1077,6 +1094,7 @@ impl EmbeddedDebuggerToolHandler {
                 match hex::decode(&args.data) {
                     Ok(bytes) => bytes,
                     Err(e) => {
+                        error!(data = %args.data, error = %e, "工具失败: rtt_write - hex数据解析失败");
                         let error_msg = format!("❌ Invalid hex data '{}': {}", args.data, e);
                         return Err(McpError::internal_error(error_msg, None));
                     }
@@ -1086,16 +1104,18 @@ impl EmbeddedDebuggerToolHandler {
                 // Parse binary string like "10110011 11001100"
                 let binary_str = args.data.replace(' ', "");
                 if binary_str.len() % 8 != 0 {
+                    error!(data = %args.data, "工具失败: rtt_write - 二进制数据长度无效");
                     let error_msg = format!("❌ Binary data must be multiple of 8 bits: '{}'", args.data);
                     return Err(McpError::internal_error(error_msg, None));
                 }
-                
+
                 let mut bytes = Vec::new();
                 for chunk in binary_str.chars().collect::<Vec<_>>().chunks(8) {
                     let byte_str: String = chunk.iter().collect();
                     match u8::from_str_radix(&byte_str, 2) {
                         Ok(byte) => bytes.push(byte),
                         Err(e) => {
+                            error!(byte_str = %byte_str, error = %e, "工具失败: rtt_write - 二进制字节解析失败");
                             let error_msg = format!("❌ Invalid binary byte '{}': {}", byte_str, e);
                             return Err(McpError::internal_error(error_msg, None));
                         }
@@ -1104,6 +1124,7 @@ impl EmbeddedDebuggerToolHandler {
                 bytes
             }
             _ => {
+                error!(encoding = %args.encoding, "工具失败: rtt_write - 不支持的编码");
                 let error_msg = format!("❌ Unsupported encoding '{}'. Use 'utf8', 'hex', or 'binary'", args.encoding);
                 return Err(McpError::internal_error(error_msg, None));
             }
@@ -1113,6 +1134,7 @@ impl EmbeddedDebuggerToolHandler {
         {
             let mut rtt_manager = session_arc.rtt_manager.lock().await;
             if !rtt_manager.is_attached() {
+                error!(session_id = %args.session_id, "工具失败: rtt_write - RTT未附加");
                 let error_msg = format!("❌ RTT not attached for session '{}'\n\nUse 'rtt_attach' first", args.session_id);
                 return Err(McpError::internal_error(error_msg, None));
             }
@@ -1128,12 +1150,12 @@ impl EmbeddedDebuggerToolHandler {
                         Data sent successfully to target.",
                         args.channel, args.session_id, args.data, args.encoding, bytes_written
                     );
-                    
-                    info!("Wrote {} bytes to RTT channel {} for session: {}", bytes_written, args.channel, args.session_id);
+
+                    info!(session_id = %args.session_id, channel = args.channel, bytes = bytes_written, "工具完成: rtt_write");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Failed to write to RTT channel {} for session {}: {}", args.channel, args.session_id, e);
+                    error!(session_id = %args.session_id, channel = args.channel, error = %e, "工具失败: rtt_write - 写入失败");
                     let error_msg = format!(
                         "❌ Failed to write to RTT channel {}\n\n\
                         Session ID: {}\n\
@@ -1148,14 +1170,15 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "List available RTT channels")]
     async fn rtt_channels(&self, Parameters(args): Parameters<RttChannelsArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Listing RTT channels for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: rtt_channels");
+
         // Get session from storage
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: rtt_channels - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1166,13 +1189,14 @@ impl EmbeddedDebuggerToolHandler {
         {
             let rtt_manager = session_arc.rtt_manager.lock().await;
             if !rtt_manager.is_attached() {
+                error!(session_id = %args.session_id, "工具失败: rtt_channels - RTT未附加");
                 let error_msg = format!("❌ RTT not attached for session '{}'\n\nUse 'rtt_attach' first", args.session_id);
                 return Err(McpError::internal_error(error_msg, None));
             }
 
             let channels = rtt_manager.get_channels();
             let channel_count = channels.len();
-            
+
             if channels.is_empty() {
                 let message = format!(
                     "📋 RTT Channels\n\n\
@@ -1180,15 +1204,16 @@ impl EmbeddedDebuggerToolHandler {
                     No RTT channels available.",
                     args.session_id
                 );
+                info!(session_id = %args.session_id, channel_count = 0, "工具完成: rtt_channels");
                 return Ok(CallToolResult::success(vec![Content::text(message)]));
             }
 
             let mut message = format!("📋 RTT Channels\n\nSession ID: {}\n\n", args.session_id);
-            
+
             // Group channels by direction
             let mut up_channels = Vec::new();
             let mut down_channels = Vec::new();
-            
+
             for channel in &channels {
                 match channel.direction {
                     crate::rtt::ChannelDirection::Up => up_channels.push(channel),
@@ -1217,17 +1242,18 @@ impl EmbeddedDebuggerToolHandler {
                 }
             }
 
-            info!("Listed {} RTT channels for session: {}", channel_count, args.session_id);
+            info!(session_id = %args.session_id, channel_count = channel_count, "工具完成: rtt_channels");
             Ok(CallToolResult::success(vec![Content::text(message)]))
         }
     }
 
     #[tool(description = "Read symbol address and size from ELF file")]
     async fn read_symbol(&self, Parameters(args): Parameters<ReadSymbolArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Reading symbol '{}' from ELF: {}", args.symbol_name, args.elf_path);
+        info!(input = ?args, "工具调用: read_symbol");
 
         let elf_path = std::path::Path::new(&args.elf_path);
         if !elf_path.exists() {
+            error!(elf_path = %args.elf_path, "工具失败: read_symbol - ELF文件不存在");
             let error_msg = format!("❌ ELF file not found: {}\n\nPlease provide a valid path to an ELF firmware file.", args.elf_path);
             return Err(McpError::internal_error(error_msg, None));
         }
@@ -1237,21 +1263,24 @@ impl EmbeddedDebuggerToolHandler {
             match crate::rtt::find_symbols_by_pattern(elf_path, &args.symbol_name) {
                 Ok(symbols) => {
                     if symbols.is_empty() {
+                        info!(symbol = %args.symbol_name, matches = 0, "工具完成: read_symbol - 未找到匹配符号");
                         format!("🔍 Search Results for '{}':\n\nNo matching symbols found.", args.symbol_name)
                     } else {
                         let mut msg = format!("🔍 Search Results for '{}' ({} matches):\n\n", args.symbol_name, symbols.len());
                         msg.push_str("| Symbol Name | Address | Size | Section |\n");
                         msg.push_str("|-------------|---------|------|---------|\n");
-                        for sym in symbols {
+                        for sym in &symbols {
                             msg.push_str(&format!(
                                 "| {} | 0x{:08X} | {} bytes | {} |\n",
                                 sym.name, sym.address, sym.size, sym.section
                             ));
                         }
+                        info!(symbol = %args.symbol_name, matches = symbols.len(), "工具完成: read_symbol");
                         msg
                     }
                 }
                 Err(e) => {
+                    error!(symbol = %args.symbol_name, error = %e, "工具失败: read_symbol - 搜索失败");
                     format!("❌ Search failed: {}", e)
                 }
             }
@@ -1259,12 +1288,14 @@ impl EmbeddedDebuggerToolHandler {
             // Exact match search
             match crate::rtt::get_symbol_from_elf(elf_path, &args.symbol_name) {
                 Ok(sym) => {
+                    info!(symbol = %args.symbol_name, address = %format!("0x{:08X}", sym.address), "工具完成: read_symbol");
                     format!(
                         "✅ Symbol '{}' found:\n\n  Address: 0x{:08X}\n  Size: {} bytes\n  Section: {}",
                         sym.name, sym.address, sym.size, sym.section
                     )
                 }
                 Err(e) => {
+                    error!(symbol = %args.symbol_name, error = %e, "工具失败: read_symbol - 符号未找到");
                     format!("❌ Symbol '{}' not found: {}\n\nHint: Use verbose=true to search for symbols containing '{}' as substring.",
                         args.symbol_name, e, args.symbol_name)
                 }
@@ -1280,13 +1311,14 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Erase flash memory sectors or entire chip")]
     async fn flash_erase(&self, Parameters(args): Parameters<FlashEraseArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Flash erase for session: {}, type: {}", args.session_id, args.erase_type);
-        
+        info!(input = ?args, "工具调用: flash_erase");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: flash_erase - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1330,12 +1362,12 @@ impl EmbeddedDebuggerToolHandler {
                             None => "Full chip erased".to_string(),
                         }
                     );
-                    
-                    info!("Flash erase completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, erase_type = %args.erase_type, duration_ms = result.erase_time_ms, "工具完成: flash_erase");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Flash erase failed for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: flash_erase - 擦除失败");
                     let error_msg = format!(
                         "❌ Flash erase failed\n\n\
                         Session ID: {}\n\
@@ -1354,13 +1386,14 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Program file to flash memory (supports ELF, HEX, BIN)")]
     async fn flash_program(&self, Parameters(args): Parameters<FlashProgramArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Flash program for session: {}, file: {}", args.session_id, args.file_path);
-        
+        info!(input = ?args, "工具调用: flash_program");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: flash_program - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1374,7 +1407,10 @@ impl EmbeddedDebuggerToolHandler {
             "elf" => crate::flash::FileFormat::Elf,
             "hex" => crate::flash::FileFormat::Hex,
             "bin" => crate::flash::FileFormat::Bin,
-            _ => return Err(McpError::internal_error(format!("Unsupported format: {}", args.format), None)),
+            _ => {
+                error!(format = %args.format, "工具失败: flash_program - 不支持的格式");
+                return Err(McpError::internal_error(format!("Unsupported format: {}", args.format), None));
+            }
         };
 
         // Parse base address if provided
@@ -1409,12 +1445,12 @@ impl EmbeddedDebuggerToolHandler {
                             None => "Not performed",
                         }
                     );
-                    
-                    info!("Flash programming completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, file = %args.file_path, bytes = result.bytes_programmed, duration_ms = result.programming_time_ms, "工具完成: flash_program");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Flash programming failed for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, file = %args.file_path, error = %e, "工具失败: flash_program - 编程失败");
                     let error_msg = format!(
                         "❌ Flash programming failed\n\n\
                         Session ID: {}\n\
@@ -1435,13 +1471,14 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Verify flash memory contents")]
     async fn flash_verify(&self, Parameters(args): Parameters<FlashVerifyArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Flash verify for session: {}", args.session_id);
-        
+        info!(input = ?args, "工具调用: flash_verify");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: flash_verify - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1498,26 +1535,26 @@ impl EmbeddedDebuggerToolHandler {
                             args.session_id, address, result.bytes_verified, result.mismatches.len(),
                             std::cmp::min(10, result.mismatches.len())
                         );
-                        
+
                         for (i, mismatch) in result.mismatches.iter().take(10).enumerate() {
                             message.push_str(&format!(
                                 "  {}. 0x{:08X}: expected 0x{:02X}, got 0x{:02X}\n",
                                 i + 1, mismatch.address, mismatch.expected, mismatch.actual
                             ));
                         }
-                        
+
                         if result.mismatches.len() > 10 {
                             message.push_str(&format!("  ... and {} more mismatches\n", result.mismatches.len() - 10));
                         }
-                        
+
                         message
                     };
-                    
-                    info!("Flash verification completed for session: {}", args.session_id);
+
+                    info!(session_id = %args.session_id, success = result.success, bytes = result.bytes_verified, "工具完成: flash_verify");
                     Ok(CallToolResult::success(vec![Content::text(message)]))
                 }
                 Err(e) => {
-                    error!("Flash verification failed for session {}: {}", args.session_id, e);
+                    error!(session_id = %args.session_id, error = %e, "工具失败: flash_verify - 验证失败");
                     let error_msg = format!(
                         "❌ Flash verification error\n\n\
                         Session ID: {}\n\
@@ -1532,13 +1569,14 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Complete firmware deployment: erase, program, verify, run and attach RTT")]
     async fn run_firmware(&self, Parameters(args): Parameters<RunFirmwareArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Run firmware for session: {}, file: {}", args.session_id, args.file_path);
-        
+        info!(input = ?args, "工具调用: run_firmware");
+
         let session_arc = {
             let sessions = self.sessions.read().await;
             match sessions.get(&args.session_id) {
                 Some(session) => session.clone(),
                 None => {
+                    error!(session_id = %args.session_id, "工具失败: run_firmware - 会话不存在");
                     let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
                     return Err(McpError::internal_error(error_msg, None));
                 }
@@ -1717,7 +1755,7 @@ impl EmbeddedDebuggerToolHandler {
             if args.attach_rtt { "Use 'rtt_read' to monitor target output." } else { "Use 'rtt_attach' to enable real-time communication." }
         );
 
-        info!("Firmware deployment completed for session: {} in {:.1}s", args.session_id, elapsed.as_secs_f64());
+        info!(session_id = %args.session_id, file = %args.file_path, duration_s = %format!("{:.1}", elapsed.as_secs_f64()), "工具完成: run_firmware");
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 
@@ -1727,22 +1765,27 @@ impl EmbeddedDebuggerToolHandler {
 
     #[tool(description = "Read variable value from target memory using DWARF debug info. Supports global variables, struct members (e.g., 'config.baudrate'), and array elements (e.g., 'buffer[5]').")]
     async fn read_variable(&self, Parameters(args): Parameters<ReadVariableArgs>) -> Result<CallToolResult, McpError> {
-        debug!("Reading variable '{}' for session: {}", args.expression, args.session_id);
+        info!(input = ?args, "工具调用: read_variable");
 
         // 获取会话
         let sessions = self.sessions.read().await;
         let session_data = sessions.get(&args.session_id).ok_or_else(|| {
+            error!(session_id = %args.session_id, "工具失败: read_variable - 会话不存在");
             McpError::invalid_params(format!("Session not found: {}", args.session_id), None)
         })?;
 
         // 解析表达式获取地址和类型
         let elf_path = std::path::Path::new(&args.elf_path);
         let resolved = dwarf_parser::resolve_expression(elf_path, &args.expression)
-            .map_err(|e| McpError::invalid_params(format!("Failed to resolve expression '{}': {}", args.expression, e), None))?;
+            .map_err(|e| {
+                error!(expression = %args.expression, error = %e, "工具失败: read_variable - 表达式解析失败");
+                McpError::invalid_params(format!("Failed to resolve expression '{}': {}", args.expression, e), None)
+            })?;
 
         // 读取内存
         let size = resolved.type_info.size() as usize;
         if size == 0 {
+            error!(expression = %args.expression, "工具失败: read_variable - 变量大小为0");
             return Err(McpError::invalid_params("Cannot read variable with size 0", None));
         }
 
@@ -1750,17 +1793,22 @@ impl EmbeddedDebuggerToolHandler {
         {
             let mut session = session_data.session.lock().await;
             let mut core = session.core(0).map_err(|e| {
+                error!(error = %e, "工具失败: read_variable - 无法访问核心");
                 McpError::internal_error(format!("Failed to access core: {}", e), None)
             })?;
 
             core.read(resolved.address, &mut data).map_err(|e| {
+                error!(address = %format!("0x{:08X}", resolved.address), error = %e, "工具失败: read_variable - 内存读取失败");
                 McpError::internal_error(format!("Failed to read memory at 0x{:08X}: {}", resolved.address, e), None)
             })?;
         }
 
         // 解释值
         let value = dwarf_parser::interpret_value(&data, &resolved.type_info)
-            .map_err(|e| McpError::internal_error(format!("Failed to interpret value: {}", e), None))?;
+            .map_err(|e| {
+                error!(error = %e, "工具失败: read_variable - 值解释失败");
+                McpError::internal_error(format!("Failed to interpret value: {}", e), None)
+            })?;
 
         // 构建响应
         let response = serde_json::json!({
@@ -1772,7 +1820,7 @@ impl EmbeddedDebuggerToolHandler {
         });
 
         let message = serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{:?}", response));
-        info!("Read variable '{}' at 0x{:08X}, size={}", args.expression, resolved.address, size);
+        info!(session_id = %args.session_id, expression = %args.expression, address = %format!("0x{:08X}", resolved.address), size = size, "工具完成: read_variable");
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 }

@@ -24,6 +24,10 @@ pub struct Args {
     #[arg(long)]
     pub log_file: Option<PathBuf>,
 
+    /// Enable file logging (default path: mcp-server.log)
+    #[arg(long)]
+    pub enable_file_log: bool,
+
     /// Maximum number of concurrent debug sessions
     #[arg(long, default_value = "5")]
     pub max_sessions: usize,

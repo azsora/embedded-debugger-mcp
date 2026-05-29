@@ -20,7 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Handle special flags first
     if args.generate_config {
         let config = Config::default();
-        println!("{}", config.to_toml()?);
+        eprintln!("{}", config.to_toml()?);
         return Ok(());
     }
 
@@ -42,12 +42,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.validate_config {
         config.validate()?;
-        println!("Configuration is valid");
+        eprintln!("Configuration is valid");
         return Ok(());
     }
 
     if args.show_config {
-        println!("{}", config.to_toml()?);
+        eprintln!("{}", config.to_toml()?);
         return Ok(());
     }
 
@@ -88,6 +88,13 @@ fn init_logging(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&args.log_level));
 
+    // Determine log file path
+    let log_file_path = if args.enable_file_log {
+        Some(args.log_file.clone().unwrap_or_else(|| std::path::PathBuf::from("mcp-server.log")))
+    } else {
+        args.log_file.clone()
+    };
+
     let subscriber = fmt::Subscriber::builder()
         .with_env_filter(env_filter)
         .with_target(true)
@@ -96,17 +103,25 @@ fn init_logging(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(false);
 
     // Configure output destination
-    if let Some(log_file) = &args.log_file {
+    if let Some(log_file) = &log_file_path {
+        // Ensure parent directory exists
+        if let Some(parent) = log_file.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
+
         let file = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
+            .write(true)
+            .truncate(true)
             .open(log_file)?;
-        
+
         subscriber
             .with_writer(file)
             .init();
-        
-        println!("Logging to file: {}", log_file.display());
+
+        eprintln!("Logging to file: {}", log_file.display());
     } else {
         subscriber
             .with_writer(std::io::stderr)
