@@ -1247,7 +1247,7 @@ impl EmbeddedDebuggerToolHandler {
         }
     }
 
-    #[tool(description = "Read symbol address and size from ELF file")]
+    #[tool(description = "Read symbol address and size from ELF file. Use for functions, constants, and non-variable symbols. For reading variable values, use read_variable instead.")]
     async fn read_symbol(&self, Parameters(args): Parameters<ReadSymbolArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: read_symbol");
 
@@ -1763,7 +1763,7 @@ impl EmbeddedDebuggerToolHandler {
     // Variable Reading Tool
     // =============================================================================
 
-    #[tool(description = "Read variable value from target memory using DWARF debug info. Supports global variables, struct members (e.g., 'config.baudrate'), and array elements (e.g., 'buffer[5]').")]
+    #[tool(description = "Read variable value from target memory. Supports global variables, struct members (e.g., 'config.baudrate'), and array elements (e.g., 'buffer[5]'). Uses ELF symbol table for base address and DWARF for type/offset info.")]
     async fn read_variable(&self, Parameters(args): Parameters<ReadVariableArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: read_variable");
 
@@ -1774,16 +1774,79 @@ impl EmbeddedDebuggerToolHandler {
             McpError::invalid_params(format!("Session not found: {}", args.session_id), None)
         })?;
 
-        // 解析表达式获取地址和类型
         let elf_path = std::path::Path::new(&args.elf_path);
-        let resolved = dwarf_parser::resolve_expression(elf_path, &args.expression)
-            .map_err(|e| {
-                error!(expression = %args.expression, error = %e, "工具失败: read_variable - 表达式解析失败");
-                McpError::invalid_params(format!("Failed to resolve expression '{}': {}", args.expression, e), None)
-            })?;
+        if !elf_path.exists() {
+            error!(elf_path = %args.elf_path, "工具失败: read_variable - ELF文件不存在");
+            return Err(McpError::invalid_params(format!("ELF file not found: {}", args.elf_path), None));
+        }
 
-        // 读取内存
-        let size = resolved.type_info.size() as usize;
+        // 解析表达式：分离基础变量名和成员路径
+        let (base_var, member_path, base_array_index) = parse_variable_expression(&args.expression);
+        debug!(base_var = %base_var, member_path = ?member_path, array_index = ?base_array_index, "解析变量表达式");
+
+        // 1. 使用ELF符号表获取基础变量地址
+        let symbol = crate::rtt::get_symbol_from_elf(elf_path, base_var)
+            .map_err(|e| {
+                error!(symbol = %base_var, error = %e, "工具失败: read_variable - ELF符号未找到");
+                McpError::invalid_params(format!("Symbol '{}' not found in ELF: {}", base_var, e), None)
+            })?;
+        let base_address = symbol.address;
+        debug!(symbol = %base_var, address = %format!("0x{:08X}", base_address), "ELF符号地址");
+
+        // 2. 获取类型信息和计算最终地址
+        let (final_address, type_info) = if member_path.is_empty() && base_array_index.is_none() {
+            // 简单变量：仅用DWARF获取类型
+            let var_type = dwarf_parser::get_variable_type_info(elf_path, base_var)
+                .map_err(|e| {
+                    error!(var = %base_var, error = %e, "工具失败: read_variable - DWARF类型解析失败");
+                    McpError::internal_error(format!("Failed to get type for '{}': {}", base_var, e), None)
+                })?;
+            (base_address, var_type)
+        } else if member_path.is_empty() && base_array_index.is_some() {
+            // 数组元素访问：var[index]
+            let var_type = dwarf_parser::get_variable_type_info(elf_path, base_var)
+                .map_err(|e| {
+                    error!(var = %base_var, error = %e, "工具失败: read_variable - DWARF类型解析失败");
+                    McpError::internal_error(format!("Failed to get type for '{}': {}", base_var, e), None)
+                })?;
+
+            let idx = base_array_index.unwrap();
+            if let dwarf_parser::TypeInfo::Array { element, .. } = &var_type {
+                let elem_offset = idx as u64 * element.size();
+                (base_address + elem_offset, (**element).clone())
+            } else {
+                error!(var = %base_var, "工具失败: read_variable - 变量不是数组");
+                return Err(McpError::invalid_params(format!("'{}' is not an array", base_var), None));
+            }
+        } else {
+            // 结构体成员访问：用DWARF获取偏移和类型
+            let member_refs: Vec<&str> = member_path.iter().map(|s| s.as_str()).collect();
+            let (offset, member_type) = dwarf_parser::resolve_member_offset(elf_path, base_var, &member_refs)
+                .map_err(|e| {
+                    error!(expression = %args.expression, error = %e, "工具失败: read_variable - 成员偏移解析失败");
+                    McpError::internal_error(format!("Failed to resolve member '{}': {}", args.expression, e), None)
+                })?;
+
+            // 如果基础变量有数组索引，先计算基础偏移
+            let base_offset = if let Some(idx) = base_array_index {
+                let var_type = dwarf_parser::get_variable_type_info(elf_path, base_var)
+                    .map_err(|e| McpError::internal_error(format!("Failed to get type: {}", e), None))?;
+                if let dwarf_parser::TypeInfo::Array { element, .. } = &var_type {
+                    idx as u64 * element.size()
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+
+            (base_address + base_offset + offset, member_type)
+        };
+
+        debug!(final_address = %format!("0x{:08X}", final_address), type_name = %type_info.type_name(), "最终地址和类型");
+
+        // 3. 读取内存
+        let size = type_info.size() as usize;
         if size == 0 {
             error!(expression = %args.expression, "工具失败: read_variable - 变量大小为0");
             return Err(McpError::invalid_params("Cannot read variable with size 0", None));
@@ -1797,14 +1860,14 @@ impl EmbeddedDebuggerToolHandler {
                 McpError::internal_error(format!("Failed to access core: {}", e), None)
             })?;
 
-            core.read(resolved.address, &mut data).map_err(|e| {
-                error!(address = %format!("0x{:08X}", resolved.address), error = %e, "工具失败: read_variable - 内存读取失败");
-                McpError::internal_error(format!("Failed to read memory at 0x{:08X}: {}", resolved.address, e), None)
+            core.read(final_address, &mut data).map_err(|e| {
+                error!(address = %format!("0x{:08X}", final_address), error = %e, "工具失败: read_variable - 内存读取失败");
+                McpError::internal_error(format!("Failed to read memory at 0x{:08X}: {}", final_address, e), None)
             })?;
         }
 
-        // 解释值
-        let value = dwarf_parser::interpret_value(&data, &resolved.type_info)
+        // 4. 解释值
+        let value = dwarf_parser::interpret_value(&data, &type_info)
             .map_err(|e| {
                 error!(error = %e, "工具失败: read_variable - 值解释失败");
                 McpError::internal_error(format!("Failed to interpret value: {}", e), None)
@@ -1813,14 +1876,16 @@ impl EmbeddedDebuggerToolHandler {
         // 构建响应
         let response = serde_json::json!({
             "expression": args.expression,
-            "address": format!("0x{:08X}", resolved.address),
-            "type": resolved.type_info.type_name(),
+            "base_symbol": base_var,
+            "base_address": format!("0x{:08X}", base_address),
+            "final_address": format!("0x{:08X}", final_address),
+            "type": type_info.type_name(),
             "size": size,
             "value": value
         });
 
         let message = serde_json::to_string_pretty(&response).unwrap_or_else(|_| format!("{:?}", response));
-        info!(session_id = %args.session_id, expression = %args.expression, address = %format!("0x{:08X}", resolved.address), size = size, "工具完成: read_variable");
+        info!(session_id = %args.session_id, expression = %args.expression, address = %format!("0x{:08X}", final_address), size = size, "工具完成: read_variable");
         Ok(CallToolResult::success(vec![Content::text(message)]))
     }
 }
@@ -1832,7 +1897,7 @@ impl EmbeddedDebuggerToolHandler {
 /// Parse address string (hex or decimal) to u64
 fn parse_address(addr_str: &str) -> Result<u64, String> {
     let addr_str = addr_str.trim();
-    
+
     if addr_str.starts_with("0x") || addr_str.starts_with("0X") {
         u64::from_str_radix(&addr_str[2..], 16)
             .map_err(|e| format!("Invalid hex address: {}", e))
@@ -1840,6 +1905,32 @@ fn parse_address(addr_str: &str) -> Result<u64, String> {
         addr_str.parse::<u64>()
             .map_err(|e| format!("Invalid decimal address: {}", e))
     }
+}
+
+/// 解析变量表达式，分离基础变量名、成员路径和数组索引
+/// 输入: "config.baudrate", "buffer[5]", "arr[0].field", "simple_var"
+/// 返回: (基础变量名, 成员路径Vec, 基础变量数组索引Option)
+fn parse_variable_expression(expr: &str) -> (&str, Vec<String>, Option<usize>) {
+    let parts: Vec<&str> = expr.split('.').collect();
+    if parts.is_empty() {
+        return (expr, Vec::new(), None);
+    }
+
+    // 解析第一部分（基础变量，可能带数组索引）
+    let first_part = parts[0];
+    let (base_var, base_index) = if let Some(bracket_pos) = first_part.find('[') {
+        let name = &first_part[..bracket_pos];
+        let index_str = &first_part[bracket_pos + 1..first_part.len() - 1];
+        let index = index_str.parse().ok();
+        (name, index)
+    } else {
+        (first_part, None)
+    };
+
+    // 收集成员路径（跳过第一部分）
+    let member_path: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+
+    (base_var, member_path, base_index)
 }
 
 /// Parse data string based on format

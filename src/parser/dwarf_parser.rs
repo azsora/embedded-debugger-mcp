@@ -104,21 +104,35 @@ pub struct ResolvedSymbol {
 fn load_dwarf_data(elf_path: &Path) -> Result<DwarfData<'static>> {
     let file = crate::rtt::elf_parser::get_elf_file(elf_path)?;
 
+    // 加载所有可能需要的 DWARF 段
     let debug_abbrev_data = leak_section(&file, ".debug_abbrev")?;
     let debug_info_data = leak_section(&file, ".debug_info")?;
     let debug_str_data = leak_section(&file, ".debug_str").unwrap_or(&[]);
     let debug_line_data = leak_section(&file, ".debug_line").unwrap_or(&[]);
+    let debug_line_str_data = leak_section(&file, ".debug_line_str").unwrap_or(&[]);
+    let debug_rnglists_data = leak_section(&file, ".debug_rnglists").unwrap_or(&[]);
+    let debug_loclists_data = leak_section(&file, ".debug_loclists").unwrap_or(&[]);
+    let debug_aranges_data = leak_section(&file, ".debug_aranges").unwrap_or(&[]);
+    let debug_addr_data = leak_section(&file, ".debug_addr").unwrap_or(&[]);
+    let debug_str_offsets_data = leak_section(&file, ".debug_str_offsets").unwrap_or(&[]);
 
-    let dwarf = Dwarf::load(|section_id| {
-        let data = match section_id {
+    let dwarf: Dwarf<EndianSlice<LittleEndian>> = Dwarf::load(|section_id| {
+        let data: &[u8] = match section_id {
             gimli::SectionId::DebugAbbrev => debug_abbrev_data,
             gimli::SectionId::DebugInfo => debug_info_data,
             gimli::SectionId::DebugLine => debug_line_data,
             gimli::SectionId::DebugStr => debug_str_data,
-            _ => return Err(Box::new(std::io::Error::new(std::io::ErrorKind::NotFound, "unsupported"))),
+            gimli::SectionId::DebugLineStr => debug_line_str_data,
+            gimli::SectionId::DebugRngLists => debug_rnglists_data,
+            gimli::SectionId::DebugLocLists => debug_loclists_data,
+            gimli::SectionId::DebugAranges => debug_aranges_data,
+            gimli::SectionId::DebugAddr => debug_addr_data,
+            gimli::SectionId::DebugStrOffsets => debug_str_offsets_data,
+            // 其他段返回空数据而非错误
+            _ => &[],
         };
-        Ok(EndianSlice::new(data, LittleEndian))
-    }).map_err(|e| DebugError::DwarfError(e.to_string()))?;
+        Ok::<_, ()>(EndianSlice::new(data, LittleEndian))
+    }).unwrap();
 
     Ok(dwarf)
 }
@@ -249,10 +263,105 @@ pub fn list_structs(elf_path: &Path) -> Result<Vec<StructInfo>> {
 }
 
 // =============================================================================
-// Variable Lookup (for read_symbol)
+// Variable Type Lookup (ELF地址 + DWARF类型)
 // =============================================================================
 
-/// 查找全局/静态变量信息
+/// 仅获取变量的类型信息（用于已知地址的情况）
+/// 通过DWARF查找变量名对应的类型，不解析地址
+pub fn get_variable_type_info(elf_path: &Path, var_name: &str) -> Result<TypeInfo> {
+    debug!("Looking up type for variable '{}' in {}", var_name, elf_path.display());
+    let dwarf = load_dwarf_data(elf_path)?;
+    let debug_abbrev = &dwarf.debug_abbrev;
+
+    let mut units = dwarf.units();
+    while let Some(header) = units.next().map_err(|e| DebugError::DwarfError(e.to_string()))? {
+        let abbrev = header.abbreviations(debug_abbrev).map_err(|e| DebugError::DwarfError(e.to_string()))?;
+        let unit = dwarf.unit(header).map_err(|e| DebugError::DwarfError(e.to_string()))?;
+
+        let mut entries = unit.entries();
+        while let Some((_, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
+            if entry.tag() == gimli::constants::DW_TAG_variable {
+                if let Some(name) = get_string(&entry, &dwarf, gimli::constants::DW_AT_name) {
+                    if name == var_name {
+                        return resolve_type_from_entry(&entry, &unit, &abbrev, &dwarf);
+                    }
+                }
+            }
+        }
+    }
+
+    Err(DebugError::VariableNotFound(var_name.to_string()))
+}
+
+/// 解析结构体成员的偏移和类型
+/// 输入：ELF路径、基础变量名、成员路径（如 ["baudrate"] 或 ["nested", "field"]）
+/// 返回：(总偏移量, 成员类型)
+pub fn resolve_member_offset(elf_path: &Path, base_var: &str, member_path: &[&str]) -> Result<(u64, TypeInfo)> {
+    if member_path.is_empty() {
+        return Err(DebugError::DwarfError("Empty member path".to_string()));
+    }
+
+    debug!("Resolving member offset for '{}.{}'", base_var, member_path.join("."));
+
+    // 获取基础变量的类型
+    let base_type = get_variable_type_info(elf_path, base_var)?;
+
+    let mut current_type = base_type;
+    let mut total_offset: u64 = 0;
+
+    for member_name in member_path {
+        // 解析可能的数组索引
+        let (name, array_index) = parse_name_and_index(member_name);
+
+        match &current_type {
+            TypeInfo::Struct { members, .. } => {
+                let member = members.iter()
+                    .find(|m| m.name == name)
+                    .ok_or_else(|| DebugError::MemberNotFound(
+                        current_type.type_name(),
+                        name.to_string()
+                    ))?;
+
+                total_offset += member.offset;
+                current_type = member.type_info.clone();
+
+                // 处理数组索引
+                if let Some(idx) = array_index {
+                    if let TypeInfo::Array { element, .. } = &current_type {
+                        total_offset += idx as u64 * element.size();
+                        current_type = (**element).clone();
+                    } else {
+                        return Err(DebugError::DwarfError(format!("'{}' is not an array", name)));
+                    }
+                }
+            }
+            TypeInfo::Array { element, .. } => {
+                // 如果当前是数组，先处理数组索引
+                if let Some(idx) = array_index {
+                    total_offset += idx as u64 * element.size();
+                    current_type = (**element).clone();
+                } else {
+                    return Err(DebugError::DwarfError(format!(
+                        "Expected array index for '{}'", name
+                    )));
+                }
+            }
+            _ => {
+                return Err(DebugError::DwarfError(format!(
+                    "Cannot access member '{}' on type '{}'", name, current_type.type_name()
+                )));
+            }
+        }
+    }
+
+    Ok((total_offset, current_type))
+}
+
+// =============================================================================
+// Variable Lookup (Legacy - 完整DWARF解析)
+// =============================================================================
+
+/// 查找全局/静态变量信息（完整DWARF解析，包含地址）
 pub fn get_variable_info(elf_path: &Path, var_name: &str) -> Result<VariableInfo> {
     debug!("Looking up variable '{}' in {}", var_name, elf_path.display());
     let dwarf = load_dwarf_data(elf_path)?;
@@ -436,15 +545,43 @@ fn get_array_count(
 }
 
 /// 解析结构体成员
+/// 需要从结构体类型的偏移位置开始，遍历其子 DIE (DW_TAG_member)
 fn parse_struct_members(
-    _entry: &DebuggingInformationEntry,
-    _unit: &gimli::Unit<EndianSlice<LittleEndian>>,
-    _abbrev: &Abbreviations,
-    _dwarf: &DwarfData,
+    entry: &DebuggingInformationEntry,
+    unit: &gimli::Unit<EndianSlice<LittleEndian>>,
+    abbrev: &Abbreviations,
+    dwarf: &DwarfData,
 ) -> Result<Vec<TypedMember>> {
-    // 简化实现：需要遍历子 DIE 获取成员
-    // 完整实现需要递归解析每个 DW_TAG_member
-    Ok(Vec::new())
+    let mut members = Vec::new();
+
+    // 使用 entries_tree 来遍历子节点
+    let struct_offset = entry.offset();
+    let mut tree = unit.entries_tree(Some(struct_offset))
+        .map_err(|e| DebugError::DwarfError(e.to_string()))?;
+
+    let root = tree.root()
+        .map_err(|e| DebugError::DwarfError(e.to_string()))?;
+
+    // 遍历直接子节点
+    let mut children = root.children();
+    while let Some(child) = children.next().map_err(|e| DebugError::DwarfError(e.to_string()))? {
+        let child_entry = child.entry();
+
+        if child_entry.tag() == gimli::constants::DW_TAG_member {
+            let member_name = get_string(child_entry, dwarf, gimli::constants::DW_AT_name)
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            let member_offset = get_member_offset(child_entry);
+            let member_type = resolve_type_from_entry(child_entry, unit, abbrev, dwarf)?;
+
+            members.push(TypedMember {
+                name: member_name,
+                offset: member_offset,
+                type_info: member_type,
+            });
+        }
+    }
+
+    Ok(members)
 }
 
 /// 解析枚举变体
