@@ -102,7 +102,9 @@ pub struct ResolvedSymbol {
 
 /// Get DWARF data from ELF file
 fn load_dwarf_data(elf_path: &Path) -> Result<DwarfData<'static>> {
-    let file = crate::rtt::elf_parser::get_elf_file(elf_path)?;
+    // 借用缓存中的 File 引用，避免重复解析与重复 leak
+    let cached = crate::rtt::elf_parser::get_elf_file(elf_path)?;
+    let file = cached.file();
 
     // 加载所有可能需要的 DWARF 段
     let debug_abbrev_data = leak_section(&file, ".debug_abbrev")?;
