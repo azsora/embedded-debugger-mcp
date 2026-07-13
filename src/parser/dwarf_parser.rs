@@ -107,16 +107,16 @@ fn load_dwarf_data(elf_path: &Path) -> Result<DwarfData<'static>> {
     let file = cached.file();
 
     // 加载所有可能需要的 DWARF 段
-    let debug_abbrev_data = leak_section(&file, ".debug_abbrev")?;
-    let debug_info_data = leak_section(&file, ".debug_info")?;
-    let debug_str_data = leak_section(&file, ".debug_str").unwrap_or(&[]);
-    let debug_line_data = leak_section(&file, ".debug_line").unwrap_or(&[]);
-    let debug_line_str_data = leak_section(&file, ".debug_line_str").unwrap_or(&[]);
-    let debug_rnglists_data = leak_section(&file, ".debug_rnglists").unwrap_or(&[]);
-    let debug_loclists_data = leak_section(&file, ".debug_loclists").unwrap_or(&[]);
-    let debug_aranges_data = leak_section(&file, ".debug_aranges").unwrap_or(&[]);
-    let debug_addr_data = leak_section(&file, ".debug_addr").unwrap_or(&[]);
-    let debug_str_offsets_data = leak_section(&file, ".debug_str_offsets").unwrap_or(&[]);
+    let debug_abbrev_data = leak_section(file, ".debug_abbrev")?;
+    let debug_info_data = leak_section(file, ".debug_info")?;
+    let debug_str_data = leak_section(file, ".debug_str").unwrap_or(&[]);
+    let debug_line_data = leak_section(file, ".debug_line").unwrap_or(&[]);
+    let debug_line_str_data = leak_section(file, ".debug_line_str").unwrap_or(&[]);
+    let debug_rnglists_data = leak_section(file, ".debug_rnglists").unwrap_or(&[]);
+    let debug_loclists_data = leak_section(file, ".debug_loclists").unwrap_or(&[]);
+    let debug_aranges_data = leak_section(file, ".debug_aranges").unwrap_or(&[]);
+    let debug_addr_data = leak_section(file, ".debug_addr").unwrap_or(&[]);
+    let debug_str_offsets_data = leak_section(file, ".debug_str_offsets").unwrap_or(&[]);
 
     let dwarf: Dwarf<EndianSlice<LittleEndian>> = Dwarf::load(|section_id| {
         let data: &[u8] = match section_id {
@@ -187,10 +187,10 @@ pub fn get_struct_layout(elf_path: &Path, struct_name: &str) -> Result<StructLay
         let mut entries = header.entries(&abbrev);
         while let Some((depth, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
             if entry.tag() == gimli::constants::DW_TAG_structure_type {
-                let name = get_string(&entry, &dwarf, gimli::constants::DW_AT_name);
+                let name = get_string(entry, &dwarf, gimli::constants::DW_AT_name);
                 if let Some(name_str) = name {
                     if name_str == struct_name {
-                        let size = get_attr_u64(&entry, gimli::constants::DW_AT_byte_size).unwrap_or(0);
+                        let size = get_attr_u64(entry, gimli::constants::DW_AT_byte_size).unwrap_or(0);
                         let mut members = Vec::new();
 
                         while let Some((child_depth, child)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
@@ -199,9 +199,9 @@ pub fn get_struct_layout(elf_path: &Path, struct_name: &str) -> Result<StructLay
                             }
 
                             if child.tag() == gimli::constants::DW_TAG_member {
-                                let member_name = get_string(&child, &dwarf, gimli::constants::DW_AT_name);
-                                let member_size = get_attr_u64(&child, gimli::constants::DW_AT_byte_size).unwrap_or(0);
-                                let offset = get_member_offset(&child);
+                                let member_name = get_string(child, &dwarf, gimli::constants::DW_AT_name);
+                                let member_size = get_attr_u64(child, gimli::constants::DW_AT_byte_size).unwrap_or(0);
+                                let offset = get_member_offset(child);
 
                                 if let Some(mname) = member_name {
                                     members.push(StructMember {
@@ -253,8 +253,8 @@ pub fn list_structs(elf_path: &Path) -> Result<Vec<StructInfo>> {
         let mut entries = header.entries(&abbrev);
         while let Some((_, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
             if entry.tag() == gimli::constants::DW_TAG_structure_type {
-                if let Some(name) = get_string(&entry, &dwarf, gimli::constants::DW_AT_name) {
-                    let size = get_attr_u64(&entry, gimli::constants::DW_AT_byte_size).unwrap_or(0);
+                if let Some(name) = get_string(entry, &dwarf, gimli::constants::DW_AT_name) {
+                    let size = get_attr_u64(entry, gimli::constants::DW_AT_byte_size).unwrap_or(0);
                     structs.push(StructInfo { name, size });
                 }
             }
@@ -283,9 +283,9 @@ pub fn get_variable_type_info(elf_path: &Path, var_name: &str) -> Result<TypeInf
         let mut entries = unit.entries();
         while let Some((_, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
             if entry.tag() == gimli::constants::DW_TAG_variable {
-                if let Some(name) = get_string(&entry, &dwarf, gimli::constants::DW_AT_name) {
+                if let Some(name) = get_string(entry, &dwarf, gimli::constants::DW_AT_name) {
                     if name == var_name {
-                        return resolve_type_from_entry(&entry, &unit, &abbrev, &dwarf);
+                        return resolve_type_from_entry(entry, &unit, &abbrev, &dwarf);
                     }
                 }
             }
@@ -378,12 +378,12 @@ pub fn get_variable_info(elf_path: &Path, var_name: &str) -> Result<VariableInfo
         while let Some((_, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
             // 查找 DW_TAG_variable（全局变量）
             if entry.tag() == gimli::constants::DW_TAG_variable {
-                if let Some(name) = get_string(&entry, &dwarf, gimli::constants::DW_AT_name) {
+                if let Some(name) = get_string(entry, &dwarf, gimli::constants::DW_AT_name) {
                     if name == var_name {
                         // 获取地址
-                        let address = get_variable_address(&entry, unit.encoding())?;
+                        let address = get_variable_address(entry, unit.encoding())?;
                         // 获取类型
-                        let type_info = resolve_type_from_entry(&entry, &unit, &abbrev, &dwarf)?;
+                        let type_info = resolve_type_from_entry(entry, &unit, &abbrev, &dwarf)?;
 
                         return Ok(VariableInfo {
                             name: name.to_string(),
@@ -408,10 +408,8 @@ fn get_variable_address(entry: &DebuggingInformationEntry, encoding: gimli::Enco
             gimli::AttributeValue::Exprloc(expr) => {
                 // 解析简单的 DW_OP_addr 表达式
                 let mut ops = expr.operations(encoding);
-                if let Ok(Some(op)) = ops.next() {
-                    if let gimli::Operation::Address { address } = op {
-                        return Ok(address);
-                    }
+                if let Ok(Some(gimli::Operation::Address { address })) = ops.next() {
+                    return Ok(address);
                 }
             }
             gimli::AttributeValue::Udata(addr) => return Ok(addr),
@@ -431,11 +429,8 @@ fn resolve_type_from_entry(
     if let Some(attr) = entry.attr(gimli::constants::DW_AT_type)
         .map_err(|e| DebugError::DwarfError(e.to_string()))?
     {
-        match attr.value() {
-            gimli::AttributeValue::UnitRef(offset) => {
-                return resolve_type_at_offset(offset, unit, abbrev, dwarf);
-            }
-            _ => {}
+        if let gimli::AttributeValue::UnitRef(offset) = attr.value() {
+            return resolve_type_at_offset(offset, unit, abbrev, dwarf);
         }
     }
     Ok(TypeInfo::Unknown { size: 0, name: None })
@@ -452,7 +447,7 @@ fn resolve_type_at_offset(
         .map_err(|e| DebugError::DwarfError(e.to_string()))?;
 
     if let Some((_, entry)) = entries.next_dfs().map_err(|e| DebugError::DwarfError(e.to_string()))? {
-        return parse_type_entry(&entry, unit, abbrev, dwarf);
+        return parse_type_entry(entry, unit, abbrev, dwarf);
     }
 
     Ok(TypeInfo::Unknown { size: 0, name: None })

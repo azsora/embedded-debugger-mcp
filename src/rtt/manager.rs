@@ -287,7 +287,8 @@ impl RttManager {
                     mode: "RTT".to_string(), // Simplified as mode() requires &mut Core
                     buffer_size: down_channel.buffer_size(),
                 };
-                // Use offset for down channels to avoid ID conflicts
+                // Use offset for HashMap key to avoid conflicts with up channel keys.
+                // The ChannelInfo.id field keeps the original index (0, 1, 2...) for display.
                 self.channels.insert(1000 + i as u32, channel_info);
                 debug!("Discovered down channel {}: {} (size: {} bytes)", 
                        i, down_channel.name().unwrap_or("unnamed"), down_channel.buffer_size());

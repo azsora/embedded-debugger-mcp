@@ -263,7 +263,7 @@ pub fn get_rtt_symbol_from_elf(elf_path: &Path) -> Result<u64> {
 fn is_valid_rtt_address(address: u64) -> bool {
     const RAM_START: u64 = 0x20000000;
     const RAM_END: u64 = 0x2FFFFFFF;
-    address >= RAM_START && address <= RAM_END
+    (RAM_START..=RAM_END).contains(&address)
 }
 
 #[derive(Debug)]
