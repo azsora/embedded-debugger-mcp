@@ -13,8 +13,9 @@ use tracing::{info, warn, error};
 pub static CUSTOM_REGISTRY: std::sync::LazyLock<Arc<RwLock<Registry>>> =
     std::sync::LazyLock::new(|| Arc::new(RwLock::new(Registry::from_builtin_families())));
 
-/// Initialize the custom chip registry by loading YAML files from the specified directory
-pub fn init_custom_registry(chip_dir: &std::path::Path) -> Result<(), String> {
+/// Initialize the custom chip registry by loading YAML files from the specified directory.
+/// Must be called from an async context (uses tokio RwLock).
+pub async fn init_custom_registry(chip_dir: &std::path::Path) -> Result<(), String> {
     info!("Loading custom chips from {}", chip_dir.display());
 
     // Check if directory exists
@@ -31,8 +32,8 @@ pub fn init_custom_registry(chip_dir: &std::path::Path) -> Result<(), String> {
         .map(|e| e.path())
         .collect();
 
-    // Acquire write lock to add families (blocking, OK since we're in sync init context)
-    let mut reg_write = futures::executor::block_on(CUSTOM_REGISTRY.write());
+    // Acquire write lock to add families (async, compatible with tokio runtime)
+    let mut reg_write = CUSTOM_REGISTRY.write().await;
     let mut loaded_families = 0;
 
     for path in yaml_paths {

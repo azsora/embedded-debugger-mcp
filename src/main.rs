@@ -70,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         config.debugger.chip_dir.clone()
     };
-    if let Err(e) = init_custom_registry(&chip_dir) {
+    if let Err(e) = init_custom_registry(&chip_dir).await {
         error!("Failed to initialize custom chip registry: {}", e);
     }
 
