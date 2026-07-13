@@ -53,7 +53,7 @@
 
 ```bash
 # 克隆并从源码构建
-git clone https://github.com/adancurusul/embedded-debugger-mcp.git
+git clone https://github.com/azsora/embedded-debugger-mcp.git
 cd embedded-debugger-mcp
 cargo build --release
 ```

@@ -53,7 +53,7 @@ A professional Model Context Protocol (MCP) server for embedded debugging with p
 
 ```bash
 # Clone and build from source
-git clone https://github.com/adancurusul/embedded-debugger-mcp.git
+git clone https://github.com/azsora/embedded-debugger-mcp.git
 cd embedded-debugger-mcp
 cargo build --release
 ```

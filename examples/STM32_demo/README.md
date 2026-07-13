@@ -9,7 +9,7 @@ A comprehensive example demonstrating RTT (Real-Time Transfer) bidirectional com
 This example demonstrates:
 - **🔄 5-Channel RTT**: 3 up channels + 2 down channels for bidirectional communication
 - **📊 Interactive Debugging**: Send commands to running firmware and get real-time responses  
-- **🧪 Complete MCP Testing**: Validates all 22 MCP embedded debugger tools with real hardware
+- **🧪 Complete MCP Testing**: Validates all 24 MCP embedded debugger tools with real hardware
 - **📈 Data Streaming**: Continuous Fibonacci calculations with interactive control
 
 ## Hardware Requirements
@@ -75,7 +75,7 @@ Once running, the demo provides:
 
 ## MCP Tools Testing
 
-This demo serves as a comprehensive test platform for all 22 MCP embedded debugger tools:
+This demo serves as a comprehensive test platform for all 24 MCP embedded debugger tools:
 
 - **Probe Management** (3 tools): Connection and probe detection
 - **Memory Operations** (2 tools): Read/write memory operations  
@@ -85,7 +85,7 @@ This demo serves as a comprehensive test platform for all 22 MCP embedded debugg
 - **RTT Communication** (6 tools): Real-time data transfer
 - **Session Management** (2 tools): Status monitoring and disconnect
 
-**✅ All 22 tools tested successfully with 100% success rate**
+**✅ All 24 tools tested successfully with 100% success rate**
 
 ## Technical Features
 
