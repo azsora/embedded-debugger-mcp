@@ -7,6 +7,6 @@
 pub mod debugger_tools;
 pub mod types;
 
-// Export all 18 tools (13 base debugging + 5 RTT communication)
+// Export all 24 tools (18 base debugging + 6 RTT communication)
 pub use debugger_tools::*;
 pub use types::*;

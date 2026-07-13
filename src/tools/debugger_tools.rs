@@ -1,6 +1,6 @@
 //! Complete RMCP 1.7 implementation for embedded debugger MCP tools
 //! 
-//! This implementation provides all 18 debugging tools (13 base + 5 RTT) using real probe-rs integration
+//! This implementation provides all 24 debugging tools (18 base + 6 RTT) using real probe-rs integration
 
 use rmcp::{
     tool, tool_handler, tool_router, ServerHandler,
@@ -35,21 +35,103 @@ pub struct DebugSession {
     pub rtt_manager: Arc<tokio::sync::Mutex<RttManager>>,
 }
 
-/// Complete embedded debugger tool handler with all 18 tools
+/// Complete embedded debugger tool handler with all 24 tools
 #[derive(Clone)]
 pub struct EmbeddedDebuggerToolHandler {
     #[allow(dead_code)]
     tool_router: ToolRouter<EmbeddedDebuggerToolHandler>,
     sessions: Arc<RwLock<HashMap<String, Arc<DebugSession>>>>,
     max_sessions: usize,
+    /// Security: allow flash erase operations
+    allow_flash_erase: bool,
+    /// Security: restrict memory access to safe ranges (Flash/RAM only)
+    #[allow(dead_code)]
+    restrict_memory_access: bool,
+    /// Maximum bytes per read operation
+    max_read_size: usize,
+    /// Maximum bytes per write operation
+    max_write_size: usize,
+    /// Session timeout in seconds (0 = no timeout)
+    session_timeout_seconds: u64,
 }
 
 impl EmbeddedDebuggerToolHandler {
+    /// Create a new handler with the given limits and security settings.
     pub fn new(max_sessions: usize) -> Self {
+        Self::with_config(max_sessions, true, false, 65536, 4096, 3600)
+    }
+
+    /// Create a new handler with full security configuration.
+    pub fn with_config(
+        max_sessions: usize,
+        allow_flash_erase: bool,
+        restrict_memory_access: bool,
+        max_read_size: usize,
+        max_write_size: usize,
+        session_timeout_seconds: u64,
+    ) -> Self {
         Self {
             tool_router: Self::tool_router(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             max_sessions,
+            allow_flash_erase,
+            restrict_memory_access,
+            max_read_size,
+            max_write_size,
+            session_timeout_seconds,
+        }
+    }
+
+    /// Get a session by ID, returning a cloned Arc for use.
+    /// Automatically cleans up expired sessions based on timeout.
+    /// Logs the error and returns a standardized MCP error if not found or expired.
+    async fn get_session(&self, session_id: &str, tool_name: &str) -> Result<Arc<DebugSession>, McpError> {
+        // Check for expired sessions and clean them up
+        if self.session_timeout_seconds > 0 {
+            let now = chrono::Utc::now();
+            let mut sessions = self.sessions.write().await;
+            let timeout = chrono::Duration::seconds(self.session_timeout_seconds as i64);
+            let expired: Vec<String> = sessions
+                .iter()
+                .filter(|(_, s)| now - s.created_at > timeout)
+                .map(|(k, _)| k.clone())
+                .collect();
+            for id in &expired {
+                warn!(session_id = %id, "会话超时，自动清理");
+                sessions.remove(id);
+            }
+            // If the requested session was expired, return error
+            if expired.iter().any(|id| id == session_id) {
+                error!(session_id = %session_id, tool = %tool_name, "工具失败: {} - 会话已超时", tool_name);
+                return Err(McpError::internal_error(
+                    format!("❌ Session '{}' has expired and was cleaned up\n\nUse 'connect' to establish a new debug session", session_id),
+                    None,
+                ));
+            }
+            // Check if session exists
+            match sessions.get(session_id) {
+                Some(session) => Ok(session.clone()),
+                None => {
+                    error!(session_id = %session_id, tool = %tool_name, "工具失败: {} - 会话不存在", tool_name);
+                    Err(McpError::internal_error(
+                        format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", session_id),
+                        None,
+                    ))
+                }
+            }
+        } else {
+            // No timeout enforcement
+            let sessions = self.sessions.read().await;
+            match sessions.get(session_id) {
+                Some(session) => Ok(session.clone()),
+                None => {
+                    error!(session_id = %session_id, tool = %tool_name, "工具失败: {} - 会话不存在", tool_name);
+                    Err(McpError::internal_error(
+                        format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", session_id),
+                        None,
+                    ))
+                }
+            }
         }
     }
 }
@@ -129,24 +211,37 @@ impl EmbeddedDebuggerToolHandler {
             Some(probe_info) => {
                 info!("Opening probe: {}", probe_info.identifier);
                 match probe_info.open() {
-                    Ok(probe) => {
+                    Ok(mut probe) => {
+                        // Set probe speed if specified
+                        if let Err(e) = probe.set_speed(args.speed_khz) {
+                            warn!("Failed to set probe speed to {} kHz: {}", args.speed_khz, e);
+                        } else {
+                            info!("Probe speed set to {} kHz", args.speed_khz);
+                        }
+
                         info!("Attaching to target: {}", args.target_chip);
 
                         // Get reference to the custom registry loaded at startup
-                        // Use block_on to get the lock in async context, then drop it before any await
                         let registry = crate::debugger::registry::CUSTOM_REGISTRY.clone();
-                        let reg = futures::executor::block_on(registry.read());
+                        let reg = registry.read().await;
 
-                        // Use attach_with_registry (takes reference to Registry)
-                        let session_result = probe.attach_with_registry(&args.target_chip, Permissions::default(), &reg);
+                        // Connect to target: use attach_under_reset if requested,
+                        // otherwise normal attach with custom registry
+                        let session_result = if args.connect_under_reset {
+                            info!("Connecting under reset (using default registry)");
+                            probe.attach_under_reset(&args.target_chip, Permissions::default())
+                        } else {
+                            probe.attach_with_registry(&args.target_chip, Permissions::default(), &reg)
+                        };
 
-                        // Drop reg before await to make future Send-safe
+                        // Drop reg guard before any further .await to keep future Send-safe
                         drop(reg);
 
                         match session_result {
                             Ok(session) => {
-                                let session_id = format!("session_{}", chrono::Utc::now().timestamp_millis());
-                                
+                                // Generate unique session ID using UUID
+                                let session_id = format!("session_{}", uuid::Uuid::new_v4().simple());
+
                                 let debug_session = DebugSession {
                                     session_id: session_id.clone(),
                                     probe_identifier: probe_info.identifier.clone(),
@@ -155,7 +250,18 @@ impl EmbeddedDebuggerToolHandler {
                                     session: Arc::new(tokio::sync::Mutex::new(session)),
                                     rtt_manager: Arc::new(tokio::sync::Mutex::new(RttManager::new())),
                                 };
-                                
+
+                                // Halt after connect if requested
+                                if args.halt_after_connect {
+                                    let mut sess = debug_session.session.lock().await;
+                                    let core_result = sess.core(0);
+                                    if let Ok(mut core) = core_result {
+                                        if let Err(e) = core.halt(std::time::Duration::from_millis(1000)) {
+                                            warn!("Failed to halt after connect: {}", e);
+                                        }
+                                    }
+                                }
+
                                 // Store session
                                 {
                                     let mut sessions = self.sessions.write().await;
@@ -239,6 +345,16 @@ impl EmbeddedDebuggerToolHandler {
 
         match removed_session {
             Some(session) => {
+                // Clean up RTT before dropping the session
+                {
+                    let mut rtt_manager = session.rtt_manager.lock().await;
+                    if rtt_manager.is_attached() {
+                        if let Err(e) = rtt_manager.detach().await {
+                            warn!(session_id = %args.session_id, error = %e, "disconnect - RTT清理失败");
+                        }
+                    }
+                }
+
                 let message = format!(
                     "✅ Debug session disconnected successfully\n\n\
                     Session ID: {}\n\
@@ -257,7 +373,7 @@ impl EmbeddedDebuggerToolHandler {
             }
             None => {
                 error!(session_id = %args.session_id, "工具失败: disconnect - 会话不存在");
-                let error_msg = format!("❌ Session '{}' not found\n\nUse 'list_sessions' to see active sessions", args.session_id);
+                let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a new debug session", args.session_id);
                 Err(McpError::internal_error(error_msg, None))
             }
         }
@@ -268,17 +384,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: probe_info");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: probe_info - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "probe_info").await?;
 
         // Calculate session duration
         let duration_minutes = (chrono::Utc::now() - session_arc.created_at).num_seconds() as f64 / 60.0;
@@ -314,17 +420,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn halt(&self, Parameters(args): Parameters<HaltArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: halt");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: halt - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "halt").await?;
 
         // Halt the target
         {
@@ -382,17 +478,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn run(&self, Parameters(args): Parameters<RunArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: run");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: run - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "run").await?;
 
         // Resume the target
         {
@@ -430,17 +516,13 @@ impl EmbeddedDebuggerToolHandler {
     async fn reset(&self, Parameters(args): Parameters<ResetArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: reset");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: reset - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "reset").await?;
+
+        // probe-rs core.reset() always performs a hardware reset.
+        // Software reset (via NVIC AIRCR) is not directly exposed by the Core API.
+        if args.reset_type == "software" {
+            warn!("Software reset requested but not supported by probe-rs, using hardware reset");
+        }
 
         // Reset the target
         {
@@ -465,6 +547,11 @@ impl EmbeddedDebuggerToolHandler {
                     let pc = core.read_core_reg(core.program_counter()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
                     let sp = core.read_core_reg(core.stack_pointer()).map(|v: RegisterValue| v.try_into().unwrap_or(0u32)).unwrap_or(0);
 
+                    let reset_note = if args.reset_type == "software" {
+                        "hardware (software not supported by probe-rs)"
+                    } else {
+                        &args.reset_type
+                    };
                     let message = format!(
                         "✅ Target reset completed successfully!\n\n\
                         Session ID: {}\n\
@@ -474,7 +561,7 @@ impl EmbeddedDebuggerToolHandler {
                         SP: 0x{:08X}\n\
                         State: {}\n",
                         args.session_id,
-                        args.reset_type,
+                        reset_note,
                         args.halt_after_reset,
                         pc, sp,
                         if args.halt_after_reset { "Halted" } else { "Running" }
@@ -495,17 +582,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn step(&self, Parameters(args): Parameters<StepArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: step");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: step - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "step").await?;
 
         // Single step the target
         {
@@ -547,17 +624,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn get_status(&self, Parameters(args): Parameters<GetStatusArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: get_status");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: get_status - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "get_status").await?;
 
         // Get target status
         {
@@ -623,6 +690,15 @@ impl EmbeddedDebuggerToolHandler {
     async fn read_memory(&self, Parameters(args): Parameters<ReadMemoryArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: read_memory");
 
+        // Security check: enforce maximum read size
+        if args.size > self.max_read_size {
+            error!(size = args.size, max = self.max_read_size, "工具失败: read_memory - 超过最大读取限制");
+            return Err(McpError::internal_error(
+                format!("❌ Read size {} exceeds maximum allowed {} bytes", args.size, self.max_read_size),
+                None,
+            ));
+        }
+
         // Parse address
         let address = match parse_address(&args.address) {
             Ok(addr) => addr,
@@ -632,17 +708,7 @@ impl EmbeddedDebuggerToolHandler {
             }
         };
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: read_memory - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "read_memory").await?;
 
         // Read memory
         {
@@ -655,7 +721,7 @@ impl EmbeddedDebuggerToolHandler {
                 }
             };
 
-            let mut data = vec![0u8; args.size as usize];
+            let mut data = vec![0u8; args.size];
             match core.read(address, &mut data) {
                 Ok(_) => {
                     let formatted_data = format_memory_data(&data, &args.format, address);
@@ -702,17 +768,16 @@ impl EmbeddedDebuggerToolHandler {
             }
         };
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: write_memory - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        // Security check: enforce maximum write size
+        if data.len() > self.max_write_size {
+            error!(size = data.len(), max = self.max_write_size, "工具失败: write_memory - 超过最大写入限制");
+            return Err(McpError::internal_error(
+                format!("❌ Write size {} exceeds maximum allowed {} bytes", data.len(), self.max_write_size),
+                None,
+            ));
+        }
+
+        let session_arc = self.get_session(&args.session_id, "write_memory").await?;
 
         // Write memory
         {
@@ -765,17 +830,7 @@ impl EmbeddedDebuggerToolHandler {
             }
         };
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: set_breakpoint - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "set_breakpoint").await?;
 
         // Set breakpoint
         {
@@ -788,15 +843,26 @@ impl EmbeddedDebuggerToolHandler {
                 }
             };
 
+            // Software breakpoints are not directly supported by probe-rs Core API;
+            // fall back to hardware breakpoint with a warning.
+            if args.breakpoint_type == "software" {
+                warn!("Software breakpoints not supported, falling back to hardware breakpoint");
+            }
+
             match core.set_hw_breakpoint(address) {
                 Ok(_) => {
+                    let bp_note = if args.breakpoint_type == "software" {
+                        " (requested software, fell back to hardware)"
+                    } else {
+                        ""
+                    };
                     let message = format!(
                         "🎯 Breakpoint set successfully!\n\n\
                         Session ID: {}\n\
                         Address: 0x{:08X}\n\
-                        Type: Hardware breakpoint\n\n\
+                        Type: Hardware breakpoint{}\n\n\
                         The target will halt when execution reaches this address.",
-                        args.session_id, address
+                        args.session_id, address, bp_note
                     );
                     
                     info!(session_id = %args.session_id, address = %format!("0x{:08X}", address), "工具完成: set_breakpoint");
@@ -823,17 +889,7 @@ impl EmbeddedDebuggerToolHandler {
             }
         };
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: clear_breakpoint - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "clear_breakpoint").await?;
 
         // Clear breakpoint
         {
@@ -876,17 +932,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: rtt_attach");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: rtt_attach - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "rtt_attach").await?;
 
         // Parse control block address if provided
         let control_block_address = if let Some(addr_str) = args.control_block_address {
@@ -964,17 +1010,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: rtt_detach");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: rtt_detach - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "rtt_detach").await?;
 
         // Detach RTT
         {
@@ -1005,17 +1041,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: rtt_read");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: rtt_read - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "rtt_read").await?;
 
         // Read from RTT
         {
@@ -1075,17 +1101,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: rtt_write");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: rtt_write - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "rtt_write").await?;
 
         // Parse data based on encoding
         let data_bytes = match args.encoding.as_str() {
@@ -1173,17 +1189,7 @@ impl EmbeddedDebuggerToolHandler {
         info!(input = ?args, "工具调用: rtt_channels");
 
         // Get session from storage
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: rtt_channels - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "rtt_channels").await?;
 
         // List RTT channels
         {
@@ -1313,17 +1319,16 @@ impl EmbeddedDebuggerToolHandler {
     async fn flash_erase(&self, Parameters(args): Parameters<FlashEraseArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: flash_erase");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: flash_erase - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        // Security check: verify flash erase is allowed
+        if !self.allow_flash_erase {
+            error!(session_id = %args.session_id, "工具失败: flash_erase - 安全策略禁止擦除");
+            return Err(McpError::internal_error(
+                "❌ Flash erase is disabled by security policy (allow_flash_erase=false)".to_string(),
+                None,
+            ));
+        }
+
+        let session_arc = self.get_session(&args.session_id, "flash_erase").await?;
 
         // Parse erase type and parameters
         let erase_type = match args.erase_type.as_str() {
@@ -1388,17 +1393,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn flash_program(&self, Parameters(args): Parameters<FlashProgramArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: flash_program");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: flash_program - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "flash_program").await?;
 
         // Parse file path and format
         let file_path = std::path::Path::new(&args.file_path);
@@ -1423,7 +1418,7 @@ impl EmbeddedDebuggerToolHandler {
         // Perform programming operation
         {
             let mut session = session_arc.session.lock().await;
-            match crate::flash::FlashManager::program_file(&mut session, file_path, format, base_address).await {
+            match crate::flash::FlashManager::program_file(&mut session, file_path, format, base_address, args.verify).await {
                 Ok(result) => {
                     let message = format!(
                         "✅ Flash programming completed successfully!\n\n\
@@ -1473,17 +1468,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn flash_verify(&self, Parameters(args): Parameters<FlashVerifyArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: flash_verify");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: flash_verify - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "flash_verify").await?;
 
         // Parse address
         let address = parse_address(&args.address).map_err(|e| McpError::internal_error(e, None))?;
@@ -1571,17 +1556,7 @@ impl EmbeddedDebuggerToolHandler {
     async fn run_firmware(&self, Parameters(args): Parameters<RunFirmwareArgs>) -> Result<CallToolResult, McpError> {
         info!(input = ?args, "工具调用: run_firmware");
 
-        let session_arc = {
-            let sessions = self.sessions.read().await;
-            match sessions.get(&args.session_id) {
-                Some(session) => session.clone(),
-                None => {
-                    error!(session_id = %args.session_id, "工具失败: run_firmware - 会话不存在");
-                    let error_msg = format!("❌ Session '{}' not found\n\nUse 'connect' to establish a debug session first", args.session_id);
-                    return Err(McpError::internal_error(error_msg, None));
-                }
-            }
-        };
+        let session_arc = self.get_session(&args.session_id, "run_firmware").await?;
 
         let mut status_messages = Vec::new();
         let start_time = std::time::Instant::now();
@@ -1612,7 +1587,7 @@ impl EmbeddedDebuggerToolHandler {
 
         {
             let mut session = session_arc.session.lock().await;
-            match crate::flash::FlashManager::program_file(&mut session, std::path::Path::new(&args.file_path), format, None).await {
+            match crate::flash::FlashManager::program_file(&mut session, std::path::Path::new(&args.file_path), format, None, true).await {
                 Ok(result) => status_messages.push(format!("✅ Programmed {} bytes", result.bytes_programmed)),
                 Err(e) => {
                     let error_msg = format!("❌ Programming failed: {}", e);
@@ -1653,28 +1628,24 @@ impl EmbeddedDebuggerToolHandler {
         // Step 4: Attach RTT (if requested) - Mimic probe-rs run behavior
         if args.attach_rtt {
             status_messages.push("🔄 Step 4/5: Attaching RTT (probe-rs style)...".to_string());
-            
-            // Key improvement: Give target more time to boot, mimic probe-rs run timing
-            info!("Allowing target firmware to fully initialize RTT control block...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await; // Initial 2s delay
-            
-            // Give target additional time to fully initialize RTT (key improvement)
-            info!("Giving target additional time to initialize RTT control block...");
-            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
-            
+
+            // Use user-specified RTT timeout, split into initial delay + retry attempts
+            let total_timeout = args.rtt_timeout_ms as u64;
+            let initial_delay = (total_timeout / 4).max(500); // 25% of timeout for initial boot
+            let max_attempts = 8u64;
+            let retry_budget = total_timeout.saturating_sub(initial_delay);
+            let per_attempt_delay = (retry_budget / max_attempts).max(200);
+
+            info!("Allowing target firmware to fully initialize RTT control block (initial delay: {}ms)...", initial_delay);
+            tokio::time::sleep(tokio::time::Duration::from_millis(initial_delay)).await;
+
             // Enhanced RTT retry mechanism with probe-rs style timing
             let mut rtt_attached = false;
-            let max_attempts = 8; // Increase retry attempts
-            let mut attempt = 1;
-            
+            let mut attempt = 1u64;
+
             while attempt <= max_attempts && !rtt_attached {
-                // probe-rs style delay strategy: 1s, 1.5s, 2s, 2.5s, 3s, 3.5s, 4s, 4.5s
-                let delay_ms = 1000 + (attempt - 1) * 500;
-                info!("RTT attach attempt {}/{}, waiting {}ms for RTT control block...", attempt, max_attempts, delay_ms);
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms as u64)).await;
-                
-                // Small delay between RTT attempts (let target stabilize)
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                info!("RTT attach attempt {}/{}, waiting {}ms for RTT control block...", attempt, max_attempts, per_attempt_delay);
+                tokio::time::sleep(tokio::time::Duration::from_millis(per_attempt_delay)).await;
                 
                 // Try RTT attachment with different strategies (probe-rs style optimization)
                 let mut rtt_manager = session_arc.rtt_manager.lock().await;
@@ -1939,7 +1910,7 @@ fn parse_data(data_str: &str, format: &str) -> Result<Vec<u8>, String> {
         "hex" => {
             // Remove spaces and 0x prefixes
             let clean_str = data_str.replace(" ", "").replace("0x", "").replace("0X", "");
-            if clean_str.len() % 2 != 0 {
+            if !clean_str.len().is_multiple_of(2) {
                 return Err("Hex data must have even number of characters".to_string());
             }
             

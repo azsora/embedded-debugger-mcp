@@ -75,7 +75,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Create and serve the handler using rust-sdk standard pattern
-    let service = EmbeddedDebuggerToolHandler::new(config.server.max_sessions)
+    let service = EmbeddedDebuggerToolHandler::with_config(
+        config.server.max_sessions,
+        config.security.allow_flash_erase,
+        config.security.restrict_memory_access,
+        config.memory.max_read_size,
+        config.memory.max_write_size,
+        config.server.session_timeout_seconds,
+    )
         .serve(stdio()).await.inspect_err(|e| {
             error!("Serving error: {:?}", e);
         })?;

@@ -87,21 +87,24 @@ impl FlashManager {
             }
             EraseType::Sectors { address, size } => {
                 debug!("Starting sector erase at 0x{:08X}, size: {} bytes", address, size);
-                
-                // Calculate sector range - this is target-specific, using approximation
-                let sector_size = 4096; // Common sector size, should be target-specific
-                let sector_count = (size + sector_size - 1) / sector_size;
-                
-                // Use probe-rs flashing API for sector erase
-                let mut core = session.core(0)
-                    .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to get core: {}", e)))?;
-                
-                // For now, we'll use memory writes to simulate erase (0xFF)
-                // Real implementation should use target-specific flash algorithms
+
+                // Use FlashLoader to properly erase flash sectors via flash algorithms.
+                // Adding 0xFF data triggers the FlashLoader to erase the affected sectors.
+                let mut loader = session.target().flash_loader();
                 let erase_data = vec![0xFFu8; size];
-                core.write(address, &erase_data)
+                loader.add_data(address, &erase_data)
+                    .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to stage erase data: {}", e)))?;
+
+                let mut options = flashing::DownloadOptions::default();
+                options.verify = false;
+                options.progress = FlashProgress::empty();
+                loader.commit(session, options)
                     .map_err(|e| DebugError::FlashOperationFailed(format!("Sector erase failed: {}", e)))?;
-                
+
+                // Estimate sector count (target-specific, using common 2KB sector size)
+                let sector_size = 2048;
+                let sector_count = size.div_ceil(sector_size);
+
                 info!("Sector erase completed: {} sectors", sector_count);
                 Ok(EraseResult {
                     erase_time_ms: start_time.elapsed().as_millis() as u64,
@@ -112,11 +115,15 @@ impl FlashManager {
     }
 
     /// Program file to flash
+    ///
+    /// # Arguments
+    /// * `verify` - Whether to verify flash contents after programming
     pub async fn program_file(
         session: &mut Session,
         file_path: &Path,
         format: FileFormat,
         base_address: Option<u64>,
+        verify: bool,
     ) -> Result<ProgramResult> {
         let start_time = Instant::now();
         
@@ -143,9 +150,9 @@ impl FlashManager {
             FileFormat::Bin => flashing::Format::Bin(flashing::BinOptions { base_address, skip: 0 }),
         };
 
-        // Setup download options - use default and override what we need
+        // Setup download options - respect verify parameter
         let mut options = flashing::DownloadOptions::default();
-        options.verify = true;
+        options.verify = verify;
         options.progress = FlashProgress::empty();
 
         // Set base address for BIN files - this might need to be handled differently
@@ -172,7 +179,7 @@ impl FlashManager {
         Ok(ProgramResult {
             bytes_programmed: file_size,
             programming_time_ms: elapsed,
-            verification_result: Some(true), // probe-rs handles verification internally
+            verification_result: if verify { Some(true) } else { None },
         })
     }
 
@@ -186,16 +193,19 @@ impl FlashManager {
         
         debug!("Programming {} bytes to address 0x{:08X}", data.len(), base_address);
 
-        // Use direct memory write for now - FlashLoader API requires memory map
-        let mut core = session.core(0)
-            .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to get core: {}", e)))?;
-        
-        // Write data directly to flash memory
-        core.write(base_address, data)
-            .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to write data: {}", e)))?;
+        // Use FlashLoader for proper flash programming via flash algorithms
+        let mut loader = session.target().flash_loader();
+        loader.add_data(base_address, data)
+            .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to stage data: {}", e)))?;
+
+        let mut options = flashing::DownloadOptions::default();
+        options.verify = false;
+        options.progress = FlashProgress::empty();
+        loader.commit(session, options)
+            .map_err(|e| DebugError::FlashOperationFailed(format!("Failed to program data: {}", e)))?;
 
         let elapsed = start_time.elapsed().as_millis() as u64;
-        
+
         info!("Data programming completed: {} bytes in {}ms", data.len(), elapsed);
 
         Ok(ProgramResult {
